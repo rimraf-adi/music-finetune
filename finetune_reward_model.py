@@ -517,6 +517,7 @@ def main():
     best_val_acc = 0.0
     best_epoch = 0
     log_lines = []
+    no_improve_epochs = 0
 
     for epoch in range(args.epochs):
         train_loss, train_acc = train_one_epoch(
@@ -531,10 +532,11 @@ def main():
         log_lines.append(log)
 
         # Save best model
-        is_best = val_acc > best_val_acc
+        is_best = val_acc > (best_val_acc + args.early_stop_min_delta)
         if is_best:
             best_val_acc = val_acc
             best_epoch = epoch + 1
+            no_improve_epochs = 0
             save_path = os.path.join(args.output_dir, 'best_reward_model.pt')
             # Save both LoRA adapters and reward head
             torch.save({
@@ -548,6 +550,32 @@ def main():
                 'args': vars(args),
             }, save_path)
             print(f"  ★ Saved best model (val_acc={val_acc:.3f})")
+        else:
+            no_improve_epochs += 1
+
+        # Optional periodic checkpointing
+        if args.save_every_epochs > 0 and ((epoch + 1) % args.save_every_epochs == 0):
+            checkpoint_path = os.path.join(
+                args.output_dir, f'checkpoint_epoch_{epoch + 1}.pt'
+            )
+            torch.save({
+                'epoch': epoch + 1,
+                'model_state_dict': reward_model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'val_acc': val_acc,
+                'val_loss': val_loss,
+                'e2w': e2w,
+                'w2e': w2e,
+                'args': vars(args),
+            }, checkpoint_path)
+            print(f"  Saved checkpoint: {checkpoint_path}")
+
+        # Early stopping
+        if args.early_stop_patience > 0 and no_improve_epochs >= args.early_stop_patience:
+            print(
+                f"  Early stopping after {no_improve_epochs} epochs without improvement."
+            )
+            break
 
     # Save final model
     final_path = os.path.join(args.output_dir, 'final_reward_model.pt')
@@ -618,6 +646,14 @@ def parse_args():
                         help='Max training pairs (0=all, default=50000 for practical training)')
     parser.add_argument('--num_workers', type=int, default=0,
                         help='DataLoader num_workers')
+
+    # Checkpointing / early stopping
+    parser.add_argument('--save_every_epochs', type=int, default=1,
+                        help='Save a checkpoint every N epochs (0=disabled)')
+    parser.add_argument('--early_stop_patience', type=int, default=2,
+                        help='Stop if val acc does not improve for N epochs (0=disabled)')
+    parser.add_argument('--early_stop_min_delta', type=float, default=5e-3,
+                        help='Minimum val acc improvement to reset patience')
 
     # Misc
     parser.add_argument('--cpu', action='store_true',
