@@ -204,7 +204,7 @@ LoRA freezes the pre-trained weights $W_0 \in \mathbb{R}^{d \times k}$ and injec
 \end{equation}
 where $B \in \mathbb{R}^{d \times r_{rank}}$ and $A \in \mathbb{R}^{r_{rank} \times k}$. 
 
-We target the self-attention \textbf{Query} and \textbf{Value} matrices of the \textbf{last 2 layers} of the 12-layer encoder. With $r_{rank}=8$ and $\alpha=16$, the trainable parameter count drops to approximately 0.5\% of the full model size, significantly accelerating training speed and reducing GPU VRAM requirements.
+We target the self-attention \textbf{Query} and \textbf{Value} matrices of the \textbf{last 2 layers} of the 12-layer encoder (layers 10 and 11). For $r_{rank}=8$ and $\alpha=16$, this yields 4 adapter pairs and $49{,}152$ LoRA parameters in total. Including the reward head, the trainable parameter count in our implementation is $264{,}065$ out of $110{,}793{,}474$ total ($\approx 0.238\%$), significantly accelerating training and reducing GPU VRAM requirements.
 
 \subsection{Bradley-Terry Preference Optimization}
 

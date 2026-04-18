@@ -297,18 +297,40 @@ def load_midibert_from_checkpoint(ckpt_path, device='cpu'):
 def apply_lora(model, lora_r=8, lora_alpha=16, lora_dropout=0.05,
                n_layers_to_tune=2):
     """
-    Apply LoRA adapters to the last N transformer layers' attention modules.
+    Apply LoRA adapters to transformer attention query/value projections.
+
+    For the standard 12-layer MidiBERT architecture, this follows the spec in
+    model_dimensions.txt and targets layers 10 and 11.
     """
     # Get total number of layers
     total_layers = model.midibert.bert.config.num_hidden_layers
 
+    if total_layers == 12 and n_layers_to_tune == 2:
+        # Architecture spec: last 2 layers are exactly indices 10 and 11.
+        target_layer_indices = [10, 11]
+    else:
+        target_layer_indices = list(
+            range(max(0, total_layers - n_layers_to_tune), total_layers)
+        )
+
+    if not target_layer_indices:
+        raise ValueError("No target layers selected for LoRA.")
+
     # Target: attention query and value projections in last N layers
     target_modules = []
-    for layer_idx in range(total_layers - n_layers_to_tune, total_layers):
+    for layer_idx in target_layer_indices:
         target_modules.extend([
             f"midibert.bert.encoder.layer.{layer_idx}.attention.self.query",
             f"midibert.bert.encoder.layer.{layer_idx}.attention.self.value",
         ])
+
+    hidden_size = model.midibert.hidden_size
+    lora_params_per_projection = (hidden_size * lora_r) + (lora_r * hidden_size)
+    expected_lora_params = len(target_modules) * lora_params_per_projection
+
+    print(f"  LoRA target layers: {target_layer_indices}")
+    print(f"  LoRA target projections: {len(target_modules)} (Q/V per layer)")
+    print(f"  Expected LoRA params: {expected_lora_params:,}")
 
     lora_config = LoraConfig(
         r=lora_r,
@@ -582,7 +604,7 @@ def parse_args():
                         help='Number of last transformer layers to apply LoRA to')
 
     # Training
-    parser.add_argument('--epochs', type=int, default=50,
+    parser.add_argument('--epochs', type=int, default=15,
                         help='Number of training epochs')
     parser.add_argument('--batch_size', type=int, default=128,
                         help='Batch size')
