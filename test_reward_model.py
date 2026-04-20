@@ -23,6 +23,7 @@ import os
 import sys
 import math
 import random
+import json
 import pickle
 import argparse
 import textwrap
@@ -82,13 +83,13 @@ def validate_checkpoint(reward_ckpt_path):
         print("You must train the reward model first, then point to the")
         print("saved checkpoint. Example:")
         print()
-        print("  Step 1 — Train:")
+        print("  Step 1 - Train:")
         print("    python finetune_reward_model.py \\")
         print("        --data_dir midi_dataset \\")
         print("        --ckpt_file pretrain_model.ckpt \\")
         print("        --output_dir reward_model_output")
         print()
-        print("  Step 2 — Test:")
+        print("  Step 2 - Test:")
         print("    python test_reward_model.py \\")
         print("        --reward_ckpt reward_model_output/best_reward_model.pt \\")
         print("        --data_dir midi_dataset")
@@ -254,8 +255,8 @@ def main():
     # ── 0. Validate checkpoint exists BEFORE doing anything else ──
     print("\n[0/4] Validating checkpoint...")
     ckpt = validate_checkpoint(args.reward_ckpt)
-    print(f"  ✓ Checkpoint found: {args.reward_ckpt}")
-    print(f"  ✓ Contains keys: {list(ckpt.keys())}")
+    print(f"  * Checkpoint found: {args.reward_ckpt}")
+    print(f"  * Contains keys: {list(ckpt.keys())}")
 
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -331,7 +332,7 @@ def main():
 
     report_lines = [
         separator,
-        "  MidiBERT Reward Model — Test / Inference Report",
+        "  MidiBERT Reward Model - Test / Inference Report",
         separator,
         "",
         f"Timestamp:       {timestamp}",
@@ -354,7 +355,7 @@ def main():
         f"  Transformer layers:    12",
         f"  Attention heads:       12",
         f"  Hidden size:           768",
-        f"  Reward head:           768 → 256 → 64 → 1",
+        f"  Reward head:           768 -> 256 -> 64 -> 1",
         "",
         f"{'─' * 40}",
         "DATASET",
@@ -368,7 +369,7 @@ def main():
         f"{'─' * 40}",
         f"  Originals  — mean: {orig_mean:+.6f}  std: {orig_std:.6f}",
         f"  Corrupted  — mean: {corr_mean:+.6f}  std: {corr_std:.6f}",
-        f"  Margin (orig − corr):  {margin:+.6f}",
+        f"  Margin (orig - corr):  {margin:+.6f}",
         "",
     ]
 
@@ -400,13 +401,13 @@ def main():
     report_lines.append(f"{'─' * 40}")
 
     if pairwise_acc > 0.9:
-        verdict = "EXCELLENT — Model clearly distinguishes real from corrupted music."
+        verdict = "EXCELLENT - Model clearly distinguishes real from corrupted music."
     elif pairwise_acc > 0.7:
-        verdict = "GOOD — Model has learned meaningful preferences."
+        verdict = "GOOD - Model has learned meaningful preferences."
     elif pairwise_acc > 0.55:
-        verdict = "FAIR — Model shows some preference signal, more training may help."
+        verdict = "FAIR - Model shows some preference signal, more training may help."
     else:
-        verdict = "POOR — Model is near chance; check training or data."
+        verdict = "POOR - Model is near chance; check training or data."
 
     report_lines.append(f"  {verdict}")
     report_lines += [
@@ -419,15 +420,71 @@ def main():
 
     report_text = "\n".join(report_lines)
 
+    report_data = {
+        'timestamp': timestamp,
+        'device': str(device),
+        'checkpoint': args.reward_ckpt,
+        'training': {
+            'epoch': ckpt.get('epoch'),
+            'args': saved_args,
+            'val_acc': ckpt.get('val_acc'),
+            'val_loss': ckpt.get('val_loss'),
+        },
+        'model': {
+            'total_parameters': int(total_params),
+            'trainable_parameters': int(trainable_params),
+            'trainable_ratio_percent': trainable_params / max(total_params, 1) * 100,
+        },
+        'dataset': {
+            'originals_shape': list(originals.shape),
+            'corrupted_shape': list(corrupted.shape),
+            'possible_pairs': int(len(originals) * len(corrupted)),
+        },
+        'scores': {
+            'original_mean': float(orig_mean),
+            'original_std': float(orig_std),
+            'corrupted_mean': float(corr_mean),
+            'corrupted_std': float(corr_std),
+            'margin': float(margin),
+            'matched_correct': int(matched_correct),
+            'matched_total': int(len(orig_scores)),
+            'matched_accuracy': float(matched_acc),
+        },
+        'pairwise_accuracy': {
+            'accuracy': float(pairwise_acc),
+            'tested_pairs': int(n_tested),
+            'max_pairs_requested': int(args.max_test_pairs),
+        },
+        'top_originals': [
+            {
+                'index': int(idx),
+                'reward': float(orig_scores[idx]),
+            }
+            for idx in sorted_orig[-5:][::-1]
+        ],
+        'bottom_originals': [
+            {
+                'index': int(idx),
+                'reward': float(orig_scores[idx]),
+            }
+            for idx in sorted_orig[:5]
+        ],
+        'verdict': verdict,
+    }
+
     # ── Write to file ──
     output_path = os.path.join(args.output_dir, 'test_results.txt')
+    json_path = os.path.join(args.output_dir, 'test_results.json')
     os.makedirs(args.output_dir, exist_ok=True)
     with open(output_path, 'w') as f:
         f.write(report_text)
+    with open(json_path, 'w') as f:
+        json.dump(report_data, f, indent=2)
 
     # Also print to console
     print("\n" + report_text)
     print(f"Results saved to: {output_path}")
+    print(f"Results JSON saved to: {json_path}")
 
 
 def parse_args():
