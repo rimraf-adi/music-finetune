@@ -518,24 +518,31 @@ def generate_dataset(args):
         sys.exit(1)
 
     # ── 3. Generate corruptions ──
-    logging.info("[3/4] Generating corrupted versions...")
-    corrupted_list = []  # list of np.array (max_seq_len, 4)
-    corruption_types = []  # strategy used for each
+    logging.info(f"[3/4] Generating {args.num_corruptions} corrupted versions per original...")
+    final_originals = []
+    final_corrupted = []
+    corruption_types = []
+    final_file_names = []
 
     for i in tqdm(range(n), desc="Corrupting"):
-        corrupted, strategy = corrupt_tokens(originals[i], e2w)
-        corrupted_list.append(corrupted)
-        corruption_types.append(strategy)
+        for _ in range(args.num_corruptions):
+            corrupted, strategy = corrupt_tokens(originals[i], e2w)
+            final_originals.append(originals[i])
+            final_corrupted.append(corrupted)
+            corruption_types.append(strategy)
+            final_file_names.append(file_names[i])
+
+    total_pairs = len(final_originals)
 
     # ── 4. Save dataset components ──
-    logging.info(f"[4/4] Saving to disk: {n} originals and {n} corrupted variants...")
+    logging.info(f"[4/4] Saving to disk: {total_pairs} paired originals and corrupted variants...")
     os.makedirs(args.output_dir, exist_ok=True)
 
     metadata_rows = []
-    for i in range(n):
+    for i in range(total_pairs):
         metadata_rows.append({
-            'source_idx': i,
-            'file_name': file_names[i],
+            'source_idx': i // args.num_corruptions,
+            'file_name': final_file_names[i],
             'corruption_type': corruption_types[i],
         })
 
@@ -544,8 +551,8 @@ def generate_dataset(args):
     corrupted_path = os.path.join(args.output_dir, 'corrupted.npy')
     metadata_path = os.path.join(args.output_dir, 'metadata.csv')
 
-    np.save(originals_path, np.array(originals))
-    np.save(corrupted_path, np.array(corrupted_list))
+    np.save(originals_path, np.array(final_originals))
+    np.save(corrupted_path, np.array(final_corrupted))
 
     with open(metadata_path, 'w', newline='') as f:
         writer = csv.DictWriter(f, fieldnames=metadata_rows[0].keys())
@@ -561,7 +568,7 @@ def generate_dataset(args):
     logging.info("Dataset generation complete!")
     logging.info("=" * 60)
     logging.info(f"Total files tokenized:  {n}")
-    logging.info(f"Pairs represented:      {n * n}")
+    logging.info(f"Pairs represented:      {total_pairs}")
     logging.info("Corruption breakdown:")
     from collections import Counter
     for strat, count in Counter(corruption_types).items():
@@ -589,6 +596,8 @@ def parse_args():
                         help='Maximum sequence length per chunk')
     parser.add_argument('--max_files', type=int, default=0,
                         help='Max MIDI files to process (0 = all)')
+    parser.add_argument('--num_corruptions', type=int, default=5,
+                        help='Number of corrupted versions to generate per original chunk')
     parser.add_argument('--all_chunks', action='store_true',
                         help='Use all chunks per file (default: first chunk only)')
     parser.add_argument('--seed', type=int, default=42,

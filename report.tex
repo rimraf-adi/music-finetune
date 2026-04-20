@@ -55,7 +55,7 @@
 
 % ══════════════════════════════════════════════════════════════════════════════
 \begin{abstract}
-Evaluating and aligning generative models for symbolic music remains a significant challenge due to the subjective nature of musical quality and the absence of robust automatic metrics. Reinforcement Learning from Human Feedback (RLHF) offers a promising solution, but requires a pre-trained reward model capable of judging musical coherence. We present a complete, end-to-end preference learning pipeline built on top of MidiBERT-Piano~\cite{midibertpiano}. The framework consists of two primary components: (1) a sophisticated dataset generator that tokenizes MAESTRO v3.0.0 MIDI files into Compound Word (CP) representation and produces $n^{2}$ preference pairs via a suite of targeted corruption strategies (simulating structural, harmonic, and rhythmic degradation); and (2) a parameter-efficient fine-tuning (PEFT) script that attaches a scalar reward head to the MidiBERT encoder, training it with a Bradley--Terry preference loss using Low-Rank Adaptation (LoRA). This expansive document provides the necessary theoretical context, architectural motivations, and implementation details for the pipeline.
+Evaluating and aligning generative models for symbolic music remains a significant challenge due to the subjective nature of musical quality and the absence of robust automatic metrics. Reinforcement Learning from Human Feedback (RLHF) offers a promising solution, but requires a pre-trained reward model capable of judging musical coherence. We present a complete, end-to-end preference learning pipeline built on top of MidiBERT-Piano~\cite{midibertpiano}. The framework consists of two primary components: (1) a sophisticated dataset generator that tokenizes MAESTRO v3.0.0 MIDI files into Compound Word (CP) representation and produces augmented same-source preference pairs via a suite of targeted corruption strategies (simulating structural, harmonic, and rhythmic degradation); and (2) a parameter-efficient fine-tuning (PEFT) script that attaches a scalar reward head to the MidiBERT encoder, training it with a Bradley--Terry preference loss using Low-Rank Adaptation (LoRA). This expansive document provides the necessary theoretical context, architectural motivations, and implementation details for the pipeline.
 \end{abstract}
 
 % ══════════════════════════════════════════════════════════════════════════════
@@ -144,15 +144,17 @@ To construct preference pairs, we must simulate the types of objective errors a 
 \end{tabular}
 \end{table}
 
-\subsection{Generating $\mathcal{O}(n^2)$ Pairs}
+\subsection{Mitigating Label Noise via Same-Source Pairing and Augmentation}
 
-If we tokenize $n$ unique MIDI segments, producing $n$ original token arrays and $n$ corrupted variants, we generate the full Cartesian product to maximize dataset size and contrastive diversity:
+An initial attempt to pair every original file with every corrupted file (an $\mathcal{O}(n^2)$ Cartesian product) introduced severe label noise: comparing a pristine Chopin piece to a structurally broken Beethoven piece is ill-posed because their underlying musical content is completely mismatched. To resolve this, we enforce strict \textbf{same-source pairing}: an original segment is only ever compared against a corrupted version of itself. 
+
+To prevent data starvation from this strict $1:1$ constraint, we employ corruption augmentation: each original segment $\mathbf{x}_i^{\text{orig}}$ is subjected to $k$ independent stochastic corruptions (by default, $k=5$), yielding a dataset of $\mathcal{O}(k \cdot n)$ valid pairs:
 
 \begin{equation}
-    \mathcal{D} = \bigl\{\,(\mathbf{x}_i^{\text{orig}},\;\mathbf{x}_j^{\text{corrupt}},\;y=1) \;\big|\; i,j \in \{1,\ldots,n\}\,\bigr\}
+    \mathcal{D} = \bigl\{\,(\mathbf{x}_i^{\text{orig}},\;\mathbf{x}_{i,c}^{\text{corrupt}},\;y=1) \;\big|\; i \in \{1,\ldots,n\}, c \in \{1,\ldots,k\}\,\bigr\}
 \end{equation}
 
-By pairing original file $i$ with the corruption of file $j$, the RM must learn that \textit{any} clean, human-composed piece is preferable to \textit{any} structurally broken piece, preventing the model from merely memorizing specific songs.
+This guarantees that the preference label is directly tracking the presence of structural coherence rather than spurious stylistic differences between different composers or pieces.
 
 % ══════════════════════════════════════════════════════════════════════════════
 \section{Reward Model Architecture and Fine-Tuning}
@@ -204,7 +206,7 @@ LoRA freezes the pre-trained weights $W_0 \in \mathbb{R}^{d \times k}$ and injec
 \end{equation}
 where $B \in \mathbb{R}^{d \times r_{rank}}$ and $A \in \mathbb{R}^{r_{rank} \times k}$. 
 
-We target the self-attention \textbf{Query} and \textbf{Value} matrices of the \textbf{last 2 layers} of the 12-layer encoder (layers 10 and 11). For $r_{rank}=8$ and $\alpha=16$, this yields 4 adapter pairs and $49{,}152$ LoRA parameters in total. Including the reward head, the trainable parameter count in our implementation is $264{,}065$ out of $110{,}793{,}474$ total ($\approx 0.238\%$), significantly accelerating training and reducing GPU VRAM requirements.
+We target the self-attention \textbf{Query} and \textbf{Value} matrices of the \textbf{last 4 layers} of the 12-layer encoder (layers 8 through 11). For $r_{rank}=8$ and $\alpha=16$, this yields 8 adapter pairs and $98{,}304$ LoRA parameters in total. Including the reward head, the trainable parameter count in our implementation is $313{,}217$ out of $110{,}842{,}626$ total ($\approx 0.28\%$), balancing training capacity with efficiency.
 
 \subsection{Bradley-Terry Preference Optimization}
 
@@ -216,13 +218,13 @@ Given a preference dataset $\mathcal{D}$ consisting of pairs $(\mathbf{x}^w, \ma
     P(\mathbf{x}^w \succ \mathbf{x}^l) = \sigma\bigl(r(\mathbf{x}^w) - r(\mathbf{x}^l)\bigr) = \frac{1}{1 + \exp\bigl(-(r(\mathbf{x}^w) - r(\mathbf{x}^l))\bigr)}
 \end{equation}
 
-The network is trained to minimize the negative log-likelihood of this probability:
+To prevent the model from collapsing to trivial, infinitesimally small reward differences, we modify the standard Bradley-Terry loss by introducing a scalar \textbf{target margin} $m > 0$ (in our configuration, $m=1.0$). The network minimizes the margin-adjusted negative log-likelihood:
 
 \begin{equation}
-    \mathcal{L}_{\text{RM}} = - \mathbb{E}_{(\mathbf{x}^w, \mathbf{x}^l) \sim \mathcal{D}} \left[ \log \sigma\bigl(r(\mathbf{x}^w) - r(\mathbf{x}^l)\bigr) \right]
+    \mathcal{L}_{\text{RM}} = - \mathbb{E}_{(\mathbf{x}^w, \mathbf{x}^l) \sim \mathcal{D}} \left[ \log \sigma\bigl(r(\mathbf{x}^w) - r(\mathbf{x}^l) - m\bigr) \right]
 \end{equation}
 
-This loss forces the RM to increase the scalar gap between clean and corrupted sequences.
+This loss forces the RM to not only rank the original sequence higher than its corrupted counterpart, but to confidently push the scalar reward gap $r(\mathbf{x}^w) - r(\mathbf{x}^l)$ to be at least $m$.
 
 % ══════════════════════════════════════════════════════════════════════════════
 \section{Execution and Further Applications}
@@ -245,7 +247,7 @@ The architectural dimensions used in the standard configuration of our MidiBERT-
     \item \textbf{Concatenated Embeddings:} $B \times 512 \times 1024$.
     \item \textbf{BERT Input Projection:} $1024 \to d_{\text{model}} = 768$.
     \item \textbf{MidiBERT Transformer:} 12 layers, 12 attention heads, hidden dimension $d_{\text{model}} = 768$.
-    \item \textbf{LoRA Sub-matrices:} Rank $r = 8$, applied to the Query and Value projections of the final 2 layers. Learnable parameters $\Delta W = B A$, where $B \in \mathbb{R}^{768 \times 8}$ and $A \in \mathbb{R}^{8 \times 768}$.
+    \item \textbf{LoRA Sub-matrices:} Rank $r = 8$, applied to the Query and Value projections of the final 4 layers. Learnable parameters $\Delta W = B A$, where $B \in \mathbb{R}^{768 \times 8}$ and $A \in \mathbb{R}^{8 \times 768}$.
     \item \textbf{Mean Pooled State:} $B \times 768$ (extracted using the padding-mask).
     \item \textbf{Reward Head MLP Layers:} $768 \to 256 \to 64 \to 1$.
     \item \textbf{Final Reward Output:} $B \times 1$ scalar per sequence.

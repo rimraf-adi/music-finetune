@@ -23,8 +23,10 @@ Usage:
 import os
 import sys
 import math
+import json
 import pickle
 import random
+import re
 import argparse
 from pathlib import Path
 
@@ -46,7 +48,6 @@ try:
 except ImportError:
     print("ERROR: peft not installed. Run: pip install peft")
     sys.exit(1)
-
 
 # ─── MIDI-BERT Model (vendored from the repo) ─────────────────────────────────
 
@@ -206,10 +207,8 @@ class MidiBertRewardModel(nn.Module):
 # ─── Dataset ──────────────────────────────────────────────────────────────────
 
 class PreferencePairDataset(Dataset):
-    """Dataset of (preferred, rejected) token sequence pairs generated on-the-fly."""
-
+    """Dataset of paired original and corrupted token sequences."""
     def __init__(self, originals_path, corrupted_path):
-        # Load the base arrays. Shape: (n_files, max_seq_len, 4)
         self.originals = np.load(originals_path, allow_pickle=True)
         self.corrupted = np.load(corrupted_path, allow_pickle=True)
         assert len(self.originals) == len(self.corrupted), \
@@ -218,19 +217,11 @@ class PreferencePairDataset(Dataset):
         self.n = len(self.originals)
 
     def __len__(self):
-        # Generate the full n² combinations virtually
-        return self.n * self.n
+        return self.n
 
     def __getitem__(self, idx):
-        # Decode the flat index into (i, j) pair indices
-        # i = original file index (preferred)
-        # j = corrupted file index (rejected)
-        i = idx // self.n
-        j = idx % self.n
-        
-        preferred = torch.tensor(self.originals[i], dtype=torch.long)
-        rejected = torch.tensor(self.corrupted[j], dtype=torch.long)
-        
+        preferred = torch.tensor(self.originals[idx], dtype=torch.long)
+        rejected = torch.tensor(self.corrupted[idx], dtype=torch.long)
         return preferred, rejected
 
 
@@ -354,6 +345,9 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, device, epoch):
     total_loss = 0.0
     total_correct = 0
     total_samples = 0
+    total_margin = 0.0
+    total_margin_sq = 0.0
+    total_pref_prob = 0.0
 
     pbar = tqdm(dataloader, desc=f"Epoch {epoch + 1}")
     for batch_idx, (preferred, rejected) in enumerate(pbar):
@@ -363,9 +357,11 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, device, epoch):
         # Forward pass
         r_preferred = model(preferred)  # (B,)
         r_rejected = model(rejected)    # (B,)
+        margin = r_preferred - r_rejected
 
-        # Bradley-Terry loss: -log σ(r_w - r_l)
-        loss = -F.logsigmoid(r_preferred - r_rejected).mean()
+        # Margin-based Bradley-Terry loss
+        target_margin = 1.0
+        loss = -F.logsigmoid(margin - target_margin).mean()
 
         # Backward
         optimizer.zero_grad()
@@ -376,9 +372,13 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, device, epoch):
             scheduler.step()
 
         # Metrics
-        total_loss += loss.item() * preferred.size(0)
+        batch_size = preferred.size(0)
+        total_loss += loss.item() * batch_size
         total_correct += (r_preferred > r_rejected).sum().item()
-        total_samples += preferred.size(0)
+        total_samples += batch_size
+        total_margin += margin.sum().item()
+        total_margin_sq += (margin ** 2).sum().item()
+        total_pref_prob += torch.sigmoid(margin).sum().item()
 
         pbar.set_postfix({
             'loss': f'{loss.item():.4f}',
@@ -387,7 +387,18 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, device, epoch):
 
     avg_loss = total_loss / total_samples
     accuracy = total_correct / total_samples
-    return avg_loss, accuracy
+    avg_margin = total_margin / total_samples
+    margin_var = max(total_margin_sq / total_samples - (avg_margin ** 2), 0.0)
+    avg_pref_prob = total_pref_prob / total_samples
+    return {
+        'loss': avg_loss,
+        'accuracy': accuracy,
+        'margin_mean': avg_margin,
+        'margin_std': margin_var ** 0.5,
+        'preferred_prob_mean': avg_pref_prob,
+        'correct': total_correct,
+        'samples': total_samples,
+    }
 
 
 @torch.no_grad()
@@ -397,6 +408,9 @@ def evaluate(model, dataloader, device):
     total_loss = 0.0
     total_correct = 0
     total_samples = 0
+    total_margin = 0.0
+    total_margin_sq = 0.0
+    total_pref_prob = 0.0
 
     for preferred, rejected in dataloader:
         preferred = preferred.to(device)
@@ -404,16 +418,82 @@ def evaluate(model, dataloader, device):
 
         r_preferred = model(preferred)
         r_rejected = model(rejected)
+        margin = r_preferred - r_rejected
 
-        loss = -F.logsigmoid(r_preferred - r_rejected).mean()
+        target_margin = 1.0
+        loss = -F.logsigmoid(margin - target_margin).mean()
 
-        total_loss += loss.item() * preferred.size(0)
+        batch_size = preferred.size(0)
+        total_loss += loss.item() * batch_size
         total_correct += (r_preferred > r_rejected).sum().item()
-        total_samples += preferred.size(0)
+        total_samples += batch_size
+        total_margin += margin.sum().item()
+        total_margin_sq += (margin ** 2).sum().item()
+        total_pref_prob += torch.sigmoid(margin).sum().item()
 
     avg_loss = total_loss / max(total_samples, 1)
     accuracy = total_correct / max(total_samples, 1)
-    return avg_loss, accuracy
+    avg_margin = total_margin / max(total_samples, 1)
+    margin_var = max(total_margin_sq / max(total_samples, 1) - (avg_margin ** 2), 0.0)
+    avg_pref_prob = total_pref_prob / max(total_samples, 1)
+    return {
+        'loss': avg_loss,
+        'accuracy': accuracy,
+        'margin_mean': avg_margin,
+        'margin_std': margin_var ** 0.5,
+        'preferred_prob_mean': avg_pref_prob,
+        'correct': total_correct,
+        'samples': total_samples,
+    }
+
+
+def find_latest_checkpoint(output_dir):
+    """Return the latest checkpoint_epoch_*.pt path in output_dir, or None."""
+    if not os.path.isdir(output_dir):
+        return None
+
+    latest_epoch = -1
+    latest_path = None
+    pattern = re.compile(r"^checkpoint_epoch_(\d+)\.pt$")
+
+    for name in os.listdir(output_dir):
+        match = pattern.match(name)
+        if not match:
+            continue
+        epoch_num = int(match.group(1))
+        if epoch_num > latest_epoch:
+            latest_epoch = epoch_num
+            latest_path = os.path.join(output_dir, name)
+
+    return latest_path
+
+
+def load_resume_checkpoint(checkpoint_path, model, optimizer, device):
+    """Load model/optimizer state from a reward-model checkpoint for resume."""
+    ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
+
+    if 'model_state_dict' not in ckpt:
+        raise KeyError("Checkpoint missing 'model_state_dict'; cannot resume training.")
+
+    missing, unexpected = model.load_state_dict(ckpt['model_state_dict'], strict=False)
+    if missing:
+        print(f"  [WARN] Resume checkpoint missing keys: {len(missing)}")
+        for k in missing[:5]:
+            print(f"    - {k}")
+    if unexpected:
+        print(f"  [WARN] Resume checkpoint unexpected keys: {len(unexpected)}")
+        for k in unexpected[:5]:
+            print(f"    - {k}")
+
+    if 'optimizer_state_dict' in ckpt:
+        optimizer.load_state_dict(ckpt['optimizer_state_dict'])
+    else:
+        print("  [WARN] Resume checkpoint has no optimizer_state_dict; optimizer will be fresh.")
+
+    start_epoch = int(ckpt.get('epoch', 0))
+    best_val_acc = float(ckpt.get('val_acc', 0.0))
+    best_epoch = start_epoch
+    return start_epoch, best_val_acc, best_epoch
 
 
 def main():
@@ -509,32 +589,98 @@ def main():
         weight_decay=args.weight_decay,
     )
 
-    total_steps = len(train_loader) * args.epochs
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=total_steps
-    )
-
+    start_epoch = 0
     best_val_acc = 0.0
     best_epoch = 0
-    log_lines = []
-    no_improve_epochs = 0
 
-    for epoch in range(args.epochs):
-        train_loss, train_acc = train_one_epoch(
+    resume_path = None
+    if args.resume_from:
+        if args.resume_from.lower() == 'latest':
+            resume_path = find_latest_checkpoint(args.output_dir)
+            if resume_path is None:
+                print(
+                    f"ERROR: --resume_from latest specified, but no checkpoint_epoch_*.pt found in {args.output_dir}"
+                )
+                sys.exit(1)
+        else:
+            resume_path = args.resume_from
+
+    if resume_path:
+        if not os.path.exists(resume_path):
+            print(f"ERROR: Resume checkpoint not found: {resume_path}")
+            sys.exit(1)
+
+        print(f"  Resuming from checkpoint: {resume_path}")
+        start_epoch, best_val_acc, best_epoch = load_resume_checkpoint(
+            resume_path, reward_model, optimizer, device
+        )
+        print(f"  Resume start epoch: {start_epoch + 1}")
+        print(f"  Best val acc so far: {best_val_acc:.3f}")
+
+        if start_epoch >= args.epochs:
+            print(
+                f"  Checkpoint is already at epoch {start_epoch}, which is >= --epochs {args.epochs}. Nothing to train."
+            )
+            return
+
+    total_steps = len(train_loader) * args.epochs
+    completed_steps = len(train_loader) * start_epoch
+
+    # Restore scheduler position when resuming to keep LR schedule continuous.
+    for group in optimizer.param_groups:
+        group.setdefault('initial_lr', group['lr'])
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=total_steps, last_epoch=completed_steps - 1
+    )
+
+    log_lines = []
+    metrics_history = []
+    log_path = os.path.join(args.output_dir, 'training_log.txt')
+    metrics_path = os.path.join(args.output_dir, 'training_metrics.json')
+    if start_epoch > 0 and os.path.exists(log_path):
+        with open(log_path, 'r') as f:
+            log_lines.extend([line.rstrip('\n') for line in f])
+    if start_epoch > 0 and os.path.exists(metrics_path):
+        try:
+            with open(metrics_path, 'r') as f:
+                previous_metrics = json.load(f)
+            metrics_history.extend(previous_metrics.get('history', []))
+        except Exception:
+            pass
+
+    no_improve_epochs = 0
+    final_epoch = start_epoch
+    last_train_metrics = None
+    last_val_metrics = None
+
+    for epoch in range(start_epoch, args.epochs):
+        train_metrics = train_one_epoch(
             reward_model, train_loader, optimizer, scheduler, device, epoch
         )
-        val_loss, val_acc = evaluate(reward_model, val_loader, device)
+        val_metrics = evaluate(reward_model, val_loader, device)
+        last_train_metrics = train_metrics
+        last_val_metrics = val_metrics
+        final_epoch = epoch + 1
 
         log = (f"Epoch {epoch + 1}/{args.epochs} | "
-               f"Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.3f} | "
-               f"Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.3f}")
+               f"Train Loss: {train_metrics['loss']:.4f} | Train Acc: {train_metrics['accuracy']:.3f} | "
+               f"Train Margin: {train_metrics['margin_mean']:+.4f} | Train P(win): {train_metrics['preferred_prob_mean']:.3f} | "
+               f"Val Loss: {val_metrics['loss']:.4f} | Val Acc: {val_metrics['accuracy']:.3f} | "
+               f"Val Margin: {val_metrics['margin_mean']:+.4f} | Val P(win): {val_metrics['preferred_prob_mean']:.3f}")
         print(log)
         log_lines.append(log)
 
+        epoch_metrics = {
+            'epoch': epoch + 1,
+            'train': train_metrics,
+            'val': val_metrics,
+        }
+        metrics_history.append(epoch_metrics)
+
         # Save best model
-        is_best = val_acc > (best_val_acc + args.early_stop_min_delta)
+        is_best = val_metrics['accuracy'] > (best_val_acc + args.early_stop_min_delta)
         if is_best:
-            best_val_acc = val_acc
+            best_val_acc = val_metrics['accuracy']
             best_epoch = epoch + 1
             no_improve_epochs = 0
             save_path = os.path.join(args.output_dir, 'best_reward_model.pt')
@@ -543,13 +689,16 @@ def main():
                 'epoch': epoch + 1,
                 'model_state_dict': reward_model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
-                'val_acc': val_acc,
-                'val_loss': val_loss,
+                'val_acc': val_metrics['accuracy'],
+                'val_loss': val_metrics['loss'],
+                'metrics': epoch_metrics,
+                'best_epoch': best_epoch,
+                'best_val_acc': best_val_acc,
                 'e2w': e2w,
                 'w2e': w2e,
                 'args': vars(args),
             }, save_path)
-            print(f"  ★ Saved best model (val_acc={val_acc:.3f})")
+            print(f"  * Saved best model (val_acc={val_metrics['accuracy']:.3f})")
         else:
             no_improve_epochs += 1
 
@@ -562,8 +711,9 @@ def main():
                 'epoch': epoch + 1,
                 'model_state_dict': reward_model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
-                'val_acc': val_acc,
-                'val_loss': val_loss,
+                'val_acc': val_metrics['accuracy'],
+                'val_loss': val_metrics['loss'],
+                'metrics': epoch_metrics,
                 'e2w': e2w,
                 'w2e': w2e,
                 'args': vars(args),
@@ -580,16 +730,34 @@ def main():
     # Save final model
     final_path = os.path.join(args.output_dir, 'final_reward_model.pt')
     torch.save({
-        'epoch': args.epochs,
+        'epoch': final_epoch,
         'model_state_dict': reward_model.state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
+        'val_acc': None if last_val_metrics is None else last_val_metrics['accuracy'],
+        'val_loss': None if last_val_metrics is None else last_val_metrics['loss'],
+        'metrics': None if last_val_metrics is None or last_train_metrics is None else {
+            'epoch': final_epoch,
+            'train': last_train_metrics,
+            'val': last_val_metrics,
+        },
+        'metrics_history': metrics_history,
+        'best_epoch': best_epoch,
+        'best_val_acc': best_val_acc,
         'e2w': e2w,
         'w2e': w2e,
         'args': vars(args),
     }, final_path)
 
+    metrics_path = os.path.join(args.output_dir, 'training_metrics.json')
+    with open(metrics_path, 'w') as f:
+        json.dump({
+            'best_epoch': best_epoch,
+            'best_val_acc': best_val_acc,
+            'final_epoch': final_epoch,
+            'history': metrics_history,
+        }, f, indent=2)
+
     # Save training log
-    log_path = os.path.join(args.output_dir, 'training_log.txt')
     with open(log_path, 'w') as f:
         for line in log_lines:
             f.write(line + '\n')
@@ -602,6 +770,7 @@ def main():
     print(f"  Best model:     {os.path.join(args.output_dir, 'best_reward_model.pt')}")
     print(f"  Final model:    {final_path}")
     print(f"  Training log:   {log_path}")
+    print(f"  Metrics JSON:   {metrics_path}")
 
 
 def parse_args():
@@ -616,6 +785,8 @@ def parse_args():
                         help='Path to MIDI-BERT pretrain checkpoint')
     parser.add_argument('--output_dir', type=str, default='reward_model_output',
                         help='Output directory for trained model')
+    parser.add_argument('--resume_from', type=str, default= 'latest',
+                        help="Resume checkpoint path, or 'latest' to auto-pick latest checkpoint in output_dir")
 
     # Model
     parser.add_argument('--hidden_size', type=int, default=768,
@@ -628,15 +799,15 @@ def parse_args():
                         help='LoRA alpha')
     parser.add_argument('--lora_dropout', type=float, default=0.05,
                         help='LoRA dropout')
-    parser.add_argument('--lora_layers', type=int, default=2,
+    parser.add_argument('--lora_layers', type=int, default=4,
                         help='Number of last transformer layers to apply LoRA to')
 
     # Training
-    parser.add_argument('--epochs', type=int, default=15,
+    parser.add_argument('--epochs', type=int, default=30,
                         help='Number of training epochs')
-    parser.add_argument('--batch_size', type=int, default=128,
+    parser.add_argument('--batch_size', type=int, default=16,
                         help='Batch size')
-    parser.add_argument('--lr', type=float, default=2e-4,
+    parser.add_argument('--lr', type=float, default=5e-5,
                         help='Learning rate')
     parser.add_argument('--weight_decay', type=float, default=0.01,
                         help='Weight decay')
@@ -650,7 +821,7 @@ def parse_args():
     # Checkpointing / early stopping
     parser.add_argument('--save_every_epochs', type=int, default=1,
                         help='Save a checkpoint every N epochs (0=disabled)')
-    parser.add_argument('--early_stop_patience', type=int, default=2,
+    parser.add_argument('--early_stop_patience', type=int, default=5,
                         help='Stop if val acc does not improve for N epochs (0=disabled)')
     parser.add_argument('--early_stop_min_delta', type=float, default=5e-3,
                         help='Minimum val acc improvement to reset patience')
