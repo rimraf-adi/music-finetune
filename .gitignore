@@ -1,0 +1,42 @@
+# ── Python ──
+__pycache__/
+*.py[cod]
+*.pyo
+build/
+dist/
+wheels/
+*.egg-info/
+
+# ── Virtual environments ──
+.venv/
+.env/
+
+# ── uv ──
+uv.lock
+
+# ── Large model checkpoints & data (not tracked in git) ──
+pretrain_model.ckpt
+maestro-v3.0.0/
+midi_dataset/
+reward_model_output/
+preference_data/
+# ── LaTeX build artifacts ──
+*.aux
+*.log
+*.out
+*.toc
+*.synctex.gz
+*.fls
+*.fdb_latexmk
+
+# ── OS files ──
+.DS_Store
+Thumbs.db
+
+# ── Logs ──
+
+
+# ── Scratch / throwaway scripts ──
+scratch.py
+test_dict.py
+main.py

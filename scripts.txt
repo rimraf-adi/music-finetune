@@ -1,0 +1,24 @@
+# 1. Setup Environment
+# Clone the repository and install dependencies using uv
+git clone https://github.com/rimraf-adi/music-finetune.git
+cd music-finetune
+uv sync
+
+# 2. Extract / Transfer the trained checkpoint
+# You MUST place the fine-tuned checkpoint generated on the training machine here.
+# For example, place your `best_reward_model.pt` inside the `reward_model_output/` folder.
+# mkdir -p reward_model_output
+# (Copy or extract your best_reward_model.pt into reward_model_output/best_reward_model.pt)
+
+# 3. Extract / Transfer the test dataset
+# You MUST also place the `midi_dataset` array here, or generate it.
+# (Copy the `midi_dataset/` folder containing originals.npy and corrupted.npy)
+
+# 4. Run the Inference Pipeline
+# Once the trained checkpoint and dataset are in the right places, run the test script.
+# This assumes the dataset is in `midi_dataset` and checkpoint is in `reward_model_output/best_reward_model.pt`
+uv run python test_reward_model.py \
+    --reward_ckpt reward_model_output/best_reward_model.pt \
+    --data_dir midi_dataset \
+    --output_dir test_output \
+    --batch_size 16

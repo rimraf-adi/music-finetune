@@ -1,0 +1,101 @@
+================================================================================
+        MidiBERT-Piano Reward Model — Architecture Dimensions
+================================================================================
+
+1. INPUT
+   ──────
+   Shape:  (B, 512, 4)
+           B   = Batch size
+           512 = Sequence length (max CP tokens per chunk)
+           4   = Compound Word tuple: [Bar, Position, Pitch, Duration]
+
+   Vocabulary sizes per token attribute:
+     Bar      :  4   (New, Continue, <PAD>, <MASK>)
+     Position : 18   (16 sub-bar fractions + <PAD> + <MASK>)
+     Pitch    : 88   (MIDI 22-107 piano keys + <PAD> + <MASK>)
+     Duration : 66   (64 quantized bins + <PAD> + <MASK>)
+
+2. EMBEDDING LAYER
+   ─────────────────
+   Each attribute embedding dimension:  d_attr = 256
+     E_Bar      : Embedding(4,  256)
+     E_Position : Embedding(18, 256)
+     E_Pitch    : Embedding(88, 256)
+     E_Duration : Embedding(66, 256)
+
+   Concatenation:  (B, 512, 4×256) = (B, 512, 1024)
+   Linear Projection:  W_proj ∈ R^(1024 × 768)  →  (B, 512, 768)
+
+3. MIDIBERT TRANSFORMER ENCODER
+   ──────────────────────────────
+   Architecture:    BERT (from HuggingFace transformers)
+   Hidden size:     d_model = 768
+   Num layers:      12
+   Attention heads: 12
+   Head dim:        768 / 12 = 64
+   Position type:   relative_key_query
+   Max positions:   512
+   Intermediate:    3072  (default BERT FFN)
+
+   Total base params: ~85M
+
+4. LoRA ADAPTERS (PEFT)
+   ─────────────────────
+   Applied to:     Query (W_Q) and Value (W_V) projections
+   Target layers:  Last 2 layers (layers 10 & 11)
+   Rank:           r = 8
+   Alpha:          α = 16
+   Dropout:        0.05
+
+   Per adapter:
+     A ∈ R^(8 × 768)    (down-projection)
+     B ∈ R^(768 × 8)    (up-projection)
+     ΔW = (α/r) · B·A = 2 · B·A
+
+   Total LoRA matrices:  2 layers × 2 targets (Q, V) = 4 adapter pairs
+   LoRA params:          4 × (768×8 + 8×768) = 4 × 12,288 = 49,152
+
+5. ATTENTION-MASKED MEAN POOLING
+   ───────────────────────────────
+   Input:   (B, 512, 768)   — last hidden states from the encoder
+   Mask:    m_i = 1 if Bar token ≠ Bar<PAD>, else 0
+   Output:  z = LayerNorm( Σ(m_i · h_i) / Σ(m_i) )
+            Shape: (B, 768)
+
+6. REWARD HEAD (MLP)
+   ──────────────────
+   LayerNorm(768)
+   Linear:   768 → 256
+   GELU
+   Dropout(0.1)
+   Linear:   256 → 64
+   GELU
+   Linear:    64 → 1
+   Squeeze
+
+   Output:   (B,)   — one scalar reward per sequence
+
+7. END-TO-END DATA FLOW
+   ─────────────────────
+   (B, 512, 4)          Input CP tokens
+       ↓  Embedding + Concat
+   (B, 512, 1024)       Concatenated attribute embeddings
+       ↓  W_proj
+   (B, 512, 768)        Projected to BERT hidden size
+       ↓  12× Transformer layers (LoRA on layers 10-11)
+   (B, 512, 768)        Last hidden states
+       ↓  Masked mean pool + LayerNorm
+   (B, 768)             Pooled sequence representation
+       ↓  Reward Head MLP
+   (B,)                 Scalar reward per sequence
+
+8. TRAINING
+   ─────────
+   Loss:       Bradley–Terry:  L = -E[ log σ(r_w - r_l) ]
+   Optimizer:  AdamW (lr=2e-4, weight_decay=0.01)
+   Scheduler:  Cosine Annealing over total steps
+   Grad clip:  max_norm = 1.0
+
+   Trainable parameters: LoRA adapters + Reward Head ≈ 0.5% of full model
+
+================================================================================
