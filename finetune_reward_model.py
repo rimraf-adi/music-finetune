@@ -127,17 +127,20 @@ class MidiBert(nn.Module):
 class RewardHead(nn.Module):
     """MLP that maps pooled BERT output to a scalar reward."""
 
-    def __init__(self, hidden_size, intermediate_size=256, second_layer_size=64, dropout_rate=0.1):
+    def __init__(self, hidden_size, intermediate_size=256, num_layers=2, dropout_rate=0.1):
         super().__init__()
         self.pool_norm = nn.LayerNorm(hidden_size)
-        self.head = nn.Sequential(
-            nn.Linear(hidden_size, intermediate_size),
-            nn.GELU(),
-            nn.Dropout(dropout_rate),
-            nn.Linear(intermediate_size, second_layer_size),
-            nn.GELU(),
-            nn.Linear(second_layer_size, 1),
-        )
+        
+        layers = []
+        in_dim = hidden_size
+        for _ in range(num_layers):
+            layers.append(nn.Linear(in_dim, intermediate_size))
+            layers.append(nn.GELU())
+            layers.append(nn.Dropout(dropout_rate))
+            in_dim = intermediate_size
+            
+        layers.append(nn.Linear(in_dim, 1))
+        self.head = nn.Sequential(*layers)
 
     def forward(self, hidden_states, attention_mask=None):
         """
@@ -166,10 +169,10 @@ class MidiBertRewardModel(nn.Module):
 
     def __init__(self, midibert: MidiBert, hidden_size: int = 768,
                  use_layer: int = -1, intermediate_size: int = 256,
-                 second_layer_size: int = 64, dropout_rate: float = 0.1):
+                 num_layers: int = 2, dropout_rate: float = 0.1):
         super().__init__()
         self.midibert = midibert
-        self.reward_head = RewardHead(hidden_size, intermediate_size, second_layer_size, dropout_rate)
+        self.reward_head = RewardHead(hidden_size, intermediate_size, num_layers, dropout_rate)
         self.use_layer = use_layer  # which hidden state layer to use (-1 = last)
 
     def _make_attention_mask(self, input_ids):
@@ -533,7 +536,7 @@ def main():
         hidden_size=args.hidden_size,
         use_layer=-1,  # last hidden layer
         intermediate_size=args.head_intermediate_size,
-        second_layer_size=args.head_second_layer_size,
+        num_layers=args.head_num_layers,
         dropout_rate=args.head_dropout_rate
     )
 
@@ -807,8 +810,8 @@ def parse_args():
                         help='BERT hidden size')
     parser.add_argument('--head_intermediate_size', type=int, default=256,
                         help='Reward head intermediate layer size')
-    parser.add_argument('--head_second_layer_size', type=int, default=64,
-                        help='Reward head second layer size')
+    parser.add_argument('--head_num_layers', type=int, default=2,
+                        help='Number of hidden layers in the classification head')
     parser.add_argument('--head_dropout_rate', type=float, default=0.1,
                         help='Reward head dropout rate')
     parser.add_argument('--config_json', type=str, default='',

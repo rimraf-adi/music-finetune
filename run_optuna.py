@@ -8,7 +8,7 @@ import sys
 def objective(trial):
     # Suggest hyperparameters
     head_intermediate_size = trial.suggest_categorical("head_intermediate_size", [128, 256, 512])
-    head_second_layer_size = trial.suggest_categorical("head_second_layer_size", [32, 64, 128])
+    head_num_layers = trial.suggest_int("head_num_layers", 2, 32)
     head_dropout_rate = trial.suggest_float("head_dropout_rate", 0.0, 0.5)
     lr = trial.suggest_float("lr", 1e-5, 5e-4, log=True)
     weight_decay = trial.suggest_float("weight_decay", 1e-4, 1e-1, log=True)
@@ -23,7 +23,7 @@ def objective(trial):
     cmd = [
         sys.executable, "finetune_reward_model.py",
         "--head_intermediate_size", str(head_intermediate_size),
-        "--head_second_layer_size", str(head_second_layer_size),
+        "--head_num_layers", str(head_num_layers),
         "--head_dropout_rate", str(head_dropout_rate),
         "--lr", str(lr),
         "--weight_decay", str(weight_decay),

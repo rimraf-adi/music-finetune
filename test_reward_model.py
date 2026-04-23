@@ -157,7 +157,14 @@ def load_trained_reward_model(ckpt, reward_ckpt_path, device='cpu'):
     midibert = MidiBert(config, e2w, w2e)
 
     # Build reward model
-    reward_model = MidiBertRewardModel(midibert, hidden_size=768, use_layer=-1)
+    reward_model = MidiBertRewardModel(
+        midibert, 
+        hidden_size=saved_args.get('hidden_size', 768), 
+        use_layer=-1,
+        intermediate_size=saved_args.get('head_intermediate_size', 256),
+        num_layers=saved_args.get('head_num_layers', 2),
+        dropout_rate=saved_args.get('head_dropout_rate', 0.1)
+    )
 
     # Apply LoRA with the same config used during training
     lora_r = saved_args.get('lora_r', 8)
