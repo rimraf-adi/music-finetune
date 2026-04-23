@@ -1,0 +1,111 @@
+{
+  "timestamp": "2026-04-21 17:32:14",
+  "device": "cuda",
+  "checkpoint": "reward_model_output/best_reward_model.pt",
+  "training": {
+    "epoch": 12,
+    "args": {
+      "data_dir": "preference_data",
+      "ckpt_file": "pretrain_model.ckpt",
+      "output_dir": "reward_model_output",
+      "resume_from": "",
+      "hidden_size": 768,
+      "lora_r": 8,
+      "lora_alpha": 16,
+      "lora_dropout": 0.05,
+      "lora_layers": 4,
+      "epochs": 30,
+      "batch_size": 16,
+      "lr": 5e-05,
+      "weight_decay": 0.01,
+      "val_split": 0.15,
+      "max_train_pairs": 0,
+      "num_workers": 0,
+      "save_every_epochs": 1,
+      "early_stop_patience": 5,
+      "early_stop_min_delta": 0.005,
+      "cpu": false,
+      "seed": 52
+    },
+    "val_acc": 0.8955067920585162,
+    "val_loss": 0.2996633216473999
+  },
+  "model": {
+    "total_parameters": 110842626,
+    "trainable_parameters": 313217,
+    "trainable_ratio_percent": 0.2825781121425254
+  },
+  "dataset": {
+    "originals_shape": [
+      6380,
+      512,
+      4
+    ],
+    "corrupted_shape": [
+      6380,
+      512,
+      4
+    ],
+    "possible_pairs": 40704400
+  },
+  "scores": {
+    "original_mean": 2.9899702072143555,
+    "original_std": 6.252257347106934,
+    "corrupted_mean": -10.963950157165527,
+    "corrupted_std": 12.103277206420898,
+    "margin": 13.953920364379883,
+    "matched_correct": 5750,
+    "matched_total": 6380,
+    "matched_accuracy": 0.9012539184952978
+  },
+  "pairwise_accuracy": {
+    "accuracy": 0.90234375,
+    "tested_pairs": 5120,
+    "max_pairs_requested": 5000
+  },
+  "top_originals": [
+    {
+      "index": 4025,
+      "reward": 12.783482551574707
+    },
+    {
+      "index": 4028,
+      "reward": 12.783482551574707
+    },
+    {
+      "index": 4027,
+      "reward": 12.783482551574707
+    },
+    {
+      "index": 4026,
+      "reward": 12.783482551574707
+    },
+    {
+      "index": 4029,
+      "reward": 12.783482551574707
+    }
+  ],
+  "bottom_originals": [
+    {
+      "index": 865,
+      "reward": -19.153432846069336
+    },
+    {
+      "index": 868,
+      "reward": -19.153432846069336
+    },
+    {
+      "index": 867,
+      "reward": -19.153432846069336
+    },
+    {
+      "index": 866,
+      "reward": -19.153432846069336
+    },
+    {
+      "index": 869,
+      "reward": -19.153432846069336
+    }
+  ],
+  "verdict": "EXCELLENT - Model clearly distinguishes real from corrupted music."
+}

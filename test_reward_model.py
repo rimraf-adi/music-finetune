@@ -419,6 +419,7 @@ def main():
     ]
 
     report_text = "\n".join(report_lines)
+    console_report_text = report_text.encode('ascii', errors='replace').decode('ascii')
 
     report_data = {
         'timestamp': timestamp,
@@ -476,13 +477,13 @@ def main():
     output_path = os.path.join(args.output_dir, 'test_results.txt')
     json_path = os.path.join(args.output_dir, 'test_results.json')
     os.makedirs(args.output_dir, exist_ok=True)
-    with open(output_path, 'w') as f:
+    with open(output_path, 'w', encoding='utf-8') as f:
         f.write(report_text)
-    with open(json_path, 'w') as f:
+    with open(json_path, 'w', encoding='utf-8') as f:
         json.dump(report_data, f, indent=2)
 
     # Also print to console
-    print("\n" + report_text)
+    print("\n" + console_report_text)
     print(f"Results saved to: {output_path}")
     print(f"Results JSON saved to: {json_path}")
 
@@ -493,17 +494,17 @@ def parse_args():
     )
 
     # Paths
-    parser.add_argument('--reward_ckpt', type=str, required=True,
+    parser.add_argument('--reward_ckpt', type=str, default='reward_model_output/best_reward_model.pt',
                         help='Path to trained reward model checkpoint '
                              '(e.g. reward_model_output/best_reward_model.pt). '
                              'This is REQUIRED — train the model first.')
-    parser.add_argument('--data_dir', type=str, default='midi_dataset',
+    parser.add_argument('--data_dir', type=str, default='preference_data',
                         help='Directory with originals.npy and corrupted.npy')
-    parser.add_argument('--output_dir', type=str, default='test_output',
+    parser.add_argument('--output_dir', type=str, default='test_results',
                         help='Directory to save test_results.txt')
 
     # Inference
-    parser.add_argument('--batch_size', type=int, default=16,
+    parser.add_argument('--batch_size', type=int, default=128,
                         help='Inference batch size')
     parser.add_argument('--max_test_pairs', type=int, default=5000,
                         help='Max preference pairs to test for pairwise accuracy')

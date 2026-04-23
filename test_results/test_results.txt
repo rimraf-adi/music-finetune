@@ -1,0 +1,70 @@
+========================================================================
+  MidiBERT Reward Model - Test / Inference Report
+========================================================================
+
+Timestamp:       2026-04-21 17:32:14
+Device:          cuda
+Checkpoint:      reward_model_output/best_reward_model.pt
+Training epoch:  30
+Training lr:     5e-05
+LoRA rank:       8
+LoRA layers:     4
+
+────────────────────────────────────────
+MODEL ARCHITECTURE
+────────────────────────────────────────
+  Total parameters:         110.84M  (110,842,626)
+  Trainable parameters:      313.2K  (313,217)
+  Trainable ratio:       0.28%
+
+  Input shape:           (B, 512, 4)
+  Embedding dims:        4 × 256 = 1024 → projected to 768
+  Transformer layers:    12
+  Attention heads:       12
+  Hidden size:           768
+  Reward head:           768 -> 256 -> 64 -> 1
+
+────────────────────────────────────────
+DATASET
+────────────────────────────────────────
+  Originals shape:       (6380, 512, 4)
+  Corrupted shape:       (6380, 512, 4)
+  Possible pairs (n²):   40,704,400
+
+────────────────────────────────────────
+REWARD SCORES (individual sequences)
+────────────────────────────────────────
+  Originals  — mean: +2.989970  std: 6.252257
+  Corrupted  — mean: -10.963950  std: 12.103277
+  Margin (orig - corr):  +13.953920
+
+  Top-5 highest-scoring originals:
+    idx=4025  reward=+12.783483
+    idx=4028  reward=+12.783483
+    idx=4027  reward=+12.783483
+    idx=4026  reward=+12.783483
+    idx=4029  reward=+12.783483
+  Bottom-5 lowest-scoring originals:
+    idx= 865  reward=-19.153433
+    idx= 868  reward=-19.153433
+    idx= 867  reward=-19.153433
+    idx= 866  reward=-19.153433
+    idx= 869  reward=-19.153433
+
+────────────────────────────────────────
+PAIRWISE ACCURACY
+────────────────────────────────────────
+  Matched pairs (orig_i vs corr_i):
+    Correct: 5750/6380  Accuracy: 0.9013
+
+  Random cross-pairs (full n² subset):
+    Tested:  5,120  Accuracy: 0.9023
+
+────────────────────────────────────────
+INTERPRETATION
+────────────────────────────────────────
+  EXCELLENT - Model clearly distinguishes real from corrupted music.
+
+========================================================================
+  End of Report
+========================================================================

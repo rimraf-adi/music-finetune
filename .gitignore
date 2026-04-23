@@ -15,17 +15,11 @@ wheels/
 uv.lock
 
 # ── Large model checkpoints & data (not tracked in git) ──
-*.ckpt
-*.pt
-*.pth
-*.npy
-*.pkl
+pretrain_model.ckpt
 maestro-v3.0.0/
 midi_dataset/
 reward_model_output/
-test_output/
 preference_data/
-
 # ── LaTeX build artifacts ──
 *.aux
 *.log
@@ -40,8 +34,7 @@ preference_data/
 Thumbs.db
 
 # ── Logs ──
-*.log
-dataset_generation.log
+
 
 # ── Scratch / throwaway scripts ──
 scratch.py
