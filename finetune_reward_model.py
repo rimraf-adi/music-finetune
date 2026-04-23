@@ -127,16 +127,16 @@ class MidiBert(nn.Module):
 class RewardHead(nn.Module):
     """MLP that maps pooled BERT output to a scalar reward."""
 
-    def __init__(self, hidden_size, intermediate_size=256):
+    def __init__(self, hidden_size, intermediate_size=256, second_layer_size=64, dropout_rate=0.1):
         super().__init__()
         self.pool_norm = nn.LayerNorm(hidden_size)
         self.head = nn.Sequential(
             nn.Linear(hidden_size, intermediate_size),
             nn.GELU(),
-            nn.Dropout(0.1),
-            nn.Linear(intermediate_size, 64),
+            nn.Dropout(dropout_rate),
+            nn.Linear(intermediate_size, second_layer_size),
             nn.GELU(),
-            nn.Linear(64, 1),
+            nn.Linear(second_layer_size, 1),
         )
 
     def forward(self, hidden_states, attention_mask=None):
@@ -165,10 +165,11 @@ class MidiBertRewardModel(nn.Module):
     """
 
     def __init__(self, midibert: MidiBert, hidden_size: int = 768,
-                 use_layer: int = -1):
+                 use_layer: int = -1, intermediate_size: int = 256,
+                 second_layer_size: int = 64, dropout_rate: float = 0.1):
         super().__init__()
         self.midibert = midibert
-        self.reward_head = RewardHead(hidden_size)
+        self.reward_head = RewardHead(hidden_size, intermediate_size, second_layer_size, dropout_rate)
         self.use_layer = use_layer  # which hidden state layer to use (-1 = last)
 
     def _make_attention_mask(self, input_ids):
@@ -499,6 +500,16 @@ def load_resume_checkpoint(checkpoint_path, model, optimizer, device):
 def main():
     args = parse_args()
 
+    # Load from config JSON if provided
+    if args.config_json and os.path.exists(args.config_json):
+        print(f"Loading hyperparameters from {args.config_json}...")
+        with open(args.config_json, 'r') as f:
+            config = json.load(f)
+            for k, v in config.items():
+                if hasattr(args, k):
+                    setattr(args, k, v)
+                    print(f"  Overrode {k} = {v}")
+
     # Set seeds
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -520,7 +531,10 @@ def main():
     reward_model = MidiBertRewardModel(
         midibert,
         hidden_size=args.hidden_size,
-        use_layer=-1  # last hidden layer
+        use_layer=-1,  # last hidden layer
+        intermediate_size=args.head_intermediate_size,
+        second_layer_size=args.head_second_layer_size,
+        dropout_rate=args.head_dropout_rate
     )
 
     # ── 3. Apply LoRA ──
@@ -791,6 +805,14 @@ def parse_args():
     # Model
     parser.add_argument('--hidden_size', type=int, default=768,
                         help='BERT hidden size')
+    parser.add_argument('--head_intermediate_size', type=int, default=256,
+                        help='Reward head intermediate layer size')
+    parser.add_argument('--head_second_layer_size', type=int, default=64,
+                        help='Reward head second layer size')
+    parser.add_argument('--head_dropout_rate', type=float, default=0.1,
+                        help='Reward head dropout rate')
+    parser.add_argument('--config_json', type=str, default='',
+                        help='Path to a JSON file containing hyperparameters. Overrides other args.')
 
     # LoRA
     parser.add_argument('--lora_r', type=int, default=8,

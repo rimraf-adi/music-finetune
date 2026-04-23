@@ -1,0 +1,9 @@
+{
+    "head_intermediate_size": 256,
+    "head_second_layer_size": 128,
+    "head_dropout_rate": 0.11592535033623741,
+    "lr": 5.795088143800799e-05,
+    "weight_decay": 0.0601500692740705,
+    "lora_r": 8,
+    "lora_alpha": 16
+}
