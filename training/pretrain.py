@@ -37,42 +37,50 @@ def train(config: Config, args: argparse.Namespace):
     # 1. Setup logging and metrics
     log_dir = pathlib.Path("logs") / run_id
     log_dir.mkdir(parents=True, exist_ok=True)
-    logger = ExperimentLogger(str(log_dir))
-    metrics_store = PretrainMetricsStore(str(log_dir))
+    logger = ExperimentLogger(run_id=run_id, log_dir="logs", config=config)
+    metrics_store = PretrainMetricsStore()
     ckpt_manager = CheckpointManager(str(pathlib.Path("checkpoints") / run_id))
     
-    logger.log_info(f"Starting pretraining run: {run_id} on {device}")
+    print(f"Starting pretraining run: {run_id} on {device}")
     
     # 2. DataLoaders
-    train_loader, val_loader = build_dataloaders(config.data, batch_size=config.training.batch_size)
-    logger.log_info(f"Loaded {len(train_loader)} training batches and {len(val_loader)} validation batches.")
+    import pickle
+    with open(pathlib.Path(config.data.processed_dir) / "pretrain.pkl", "rb") as f:
+        pretrain_seqs = pickle.load(f)
+    
+    # We only need pretrain seqs here, but build_dataloaders expects both
+    loaders = build_dataloaders(config, pretrain_seqs, [])
+    train_loader = loaders['train']
+    val_loader = loaders['val']
+    print(f"Loaded {len(train_loader)} training batches and {len(val_loader)} validation batches.")
     
     # 3. Model
-    model = CPTransformer(config.transformer, config.vocab, config.data)
+    model = CPTransformer(config)
     model.to(device)
     
     # 4. Optimizer and Scaler
-    optimizer = torch.optim.AdamW(model.parameters(), lr=config.training.learning_rate, 
-                                  weight_decay=config.training.weight_decay)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=config.pretrain.lr, 
+                                  weight_decay=config.pretrain.weight_decay)
     scaler = GradScaler()
     
     # 5. LR Schedule
-    total_steps = config.training.max_steps
-    warmup_steps = config.training.warmup_steps
+    total_steps = config.pretrain.epochs * max(1, len(train_loader))
+    warmup_steps = config.pretrain.warmup_steps
     scheduler = get_cosine_schedule_with_warmup(optimizer, warmup_steps, total_steps)
     
     # 6. Resume from checkpoint if specified
     start_step = 0
     if args.resume:
-        logger.log_info(f"Resuming from checkpoint: {args.resume}")
-        start_step = ckpt_manager.load(args.resume, model, optimizer, scheduler, scaler)
+        print(f"Resuming from checkpoint: {args.resume}")
+        meta = ckpt_manager.load(args.resume, model, optimizer, scheduler, device=str(device))
+        start_step = meta.get("step", 0)
         
     # 7. Training loop
     model.train()
     step = start_step
     data_iter = iter(train_loader)
     
-    logger.log_info("Starting training loop...")
+    print("Starting training loop...")
     while step < total_steps:
         try:
             batch = next(data_iter)
@@ -82,19 +90,23 @@ def train(config: Config, args: argparse.Namespace):
             
         step_start_time = time.time()
         
-        # Move batch to device
-        batch = {k: v.to(device) for k, v in batch.items()}
+        # Move batch to device (batch is a tuple of input_dict, target_dict)
+        input_dict, target_dict = batch
+        input_dict = {k: v.to(device) for k, v in input_dict.items()}
+        target_dict = {k: v.to(device) for k, v in target_dict.items()}
         
         # Forward and Loss
         optimizer.zero_grad()
         with autocast():
             # Assume model.compute_loss returns total_loss and a dict of individual losses
-            total_loss, loss_dict = model.compute_loss(batch)
+            logits_dict = model(input_dict['bar'], input_dict['position'], input_dict['pitch'], input_dict['duration'])
+            loss_dict = model.compute_loss(logits_dict, target_dict)
+            total_loss = loss_dict['loss_total']
             
         # Backward
         scaler.scale(total_loss).backward()
         scaler.unscale_(optimizer)
-        grad_norm = nn.utils.clip_grad_norm_(model.parameters(), config.training.max_grad_norm)
+        grad_norm = nn.utils.clip_grad_norm_(model.parameters(), config.pretrain.grad_clip)
         scaler.step(optimizer)
         scaler.update()
         scheduler.step()
@@ -105,20 +117,20 @@ def train(config: Config, args: argparse.Namespace):
         # Log every step
         metrics = {
             "loss_total": total_loss.item(),
-            "loss_bar": loss_dict.get("loss_bar", 0.0),
-            "loss_position": loss_dict.get("loss_position", 0.0),
-            "loss_pitch": loss_dict.get("loss_pitch", 0.0),
-            "loss_duration": loss_dict.get("loss_duration", 0.0),
+            "loss_bar": loss_dict["loss_bar"].item() if isinstance(loss_dict.get("loss_bar"), torch.Tensor) else loss_dict.get("loss_bar", 0.0),
+            "loss_position": loss_dict["loss_position"].item() if isinstance(loss_dict.get("loss_position"), torch.Tensor) else loss_dict.get("loss_position", 0.0),
+            "loss_pitch": loss_dict["loss_pitch"].item() if isinstance(loss_dict.get("loss_pitch"), torch.Tensor) else loss_dict.get("loss_pitch", 0.0),
+            "loss_duration": loss_dict["loss_duration"].item() if isinstance(loss_dict.get("loss_duration"), torch.Tensor) else loss_dict.get("loss_duration", 0.0),
             "lr": current_lr,
             "grad_norm": grad_norm.item(),
             "step_time": step_time
         }
         
-        metrics_store.add_train_step(step, metrics)
-        logger.log_metrics(step, metrics)
+        metrics_store.record(step, **metrics)
+        logger.pretrain_train.log(metrics, step=step)
         
         # Evaluate
-        if step > 0 and step % config.training.eval_every_n_steps == 0:
+        if step > 0 and step % config.pretrain.eval_every_n_steps == 0:
             model.eval()
             val_loss = 0.0
             val_loss_dict = {"loss_bar": 0.0, "loss_position": 0.0, "loss_pitch": 0.0, "loss_duration": 0.0}
@@ -126,12 +138,16 @@ def train(config: Config, args: argparse.Namespace):
             
             with torch.no_grad():
                 for val_batch in val_loader:
-                    val_batch = {k: v.to(device) for k, v in val_batch.items()}
+                    v_input, v_target = val_batch
+                    v_input = {k: v.to(device) for k, v in v_input.items()}
+                    v_target = {k: v.to(device) for k, v in v_target.items()}
                     with autocast():
-                        v_loss, v_ldict = model.compute_loss(val_batch)
+                        v_logits = model(v_input['bar'], v_input['position'], v_input['pitch'], v_input['duration'])
+                        v_ldict = model.compute_loss(v_logits, v_target)
+                        v_loss = v_ldict['loss_total']
                     val_loss += v_loss.item()
                     for k in val_loss_dict:
-                        val_loss_dict[k] += v_ldict.get(k, 0.0)
+                        val_loss_dict[k] += v_ldict.get(k, 0.0).item() if isinstance(v_ldict.get(k, 0.0), torch.Tensor) else v_ldict.get(k, 0.0)
                     num_val_batches += 1
                     
             if num_val_batches > 0:
@@ -142,23 +158,24 @@ def train(config: Config, args: argparse.Namespace):
                 val_metrics = {"val_loss_total": val_loss}
                 val_metrics.update({f"val_{k}": v for k, v in val_loss_dict.items()})
                 
-                metrics_store.add_eval_step(step, val_metrics)
-                logger.log_metrics(step, val_metrics, prefix="Eval")
+                metrics_store.record(step, **val_metrics)
+                logger.pretrain_eval.log(val_metrics, step=step)
                 
             model.train()
             
         # Save Checkpoint
-        if step > 0 and step % config.training.save_every_n_steps == 0:
-            ckpt_manager.save(step, model, optimizer, scheduler, scaler)
-            metrics_store.save()
-            logger.log_info(f"Saved checkpoint and metrics at step {step}")
+        if step > 0 and step % config.pretrain.save_every_n_steps == 0:
+            ckpt_manager.save(step, model, optimizer, scheduler)
+            metrics_store.save(str(log_dir / "metrics.json"))
+            print(f"Saved checkpoint and metrics at step {step}")
             
         step += 1
         
     # Final save
-    ckpt_manager.save(total_steps, model, optimizer, scheduler, scaler)
-    metrics_store.save()
-    logger.log_info("Pretraining completed successfully.")
+    if total_steps > 0:
+        ckpt_manager.save(total_steps, model, optimizer, scheduler)
+    metrics_store.save(str(log_dir / "metrics.json"))
+    print("Pretraining completed successfully.")
 
 if __name__ == "__main__":
     args = parse_args()

@@ -304,7 +304,7 @@ The ATEPP dataset~\cite{atepp}, consisting of approximately 14,000 sequences of 
 %\subsection{Training Pipeline}
 
 The training consists of two phases. In Phase 1 (Transformer pretraining), the model is trained for 100 epochs with a batch size of 128 using the AdamW optimizer (learning rate = $3 \times 10^{-4}$) and a cosine learning rate schedule. Mixed-precision training is employed, resulting in approximately ${\sim}54{,}000$ optimization steps.
-In Phase 2 (fine-tuning with GRPO), the closed-loop performance is further optimized for 1500 steps using the frozen MidiBERT reward sensor and the complementary 25\% data split. The best checkpoint obtained from pretraining is used to initialize both the active policy network and the frozen reference model.
+In Phase 2 (fine-tuning with GRPO), the closed-loop performance is further optimized for 1500 steps using the frozen MidiBERT reward sensor and the complementary 25\% data split. The best checkpoint obtained from pretraining is used to initialize both the active policy network and the frozen reference model. Furthermore, model checkpoints are saved at regular intervals during GRPO training to allow for resumption and to preserve the best-performing controller weights.
 % ═══════════════════════════════════════════════════════════════
 %\section{Results and Analysis}
 

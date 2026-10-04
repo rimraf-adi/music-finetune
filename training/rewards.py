@@ -24,8 +24,26 @@ def compute_tracking_reward(
         reward: (batch_size,) The tracking reward.
     """
     # Extract features from generated CP sequences
-    # y_gen should have shape (batch_size, num_features, time_steps)
-    y_gen = mft_extractor.extract(cp_sequences)
+    batch_dict = {
+        'bar': cp_sequences[..., 0],
+        'position': cp_sequences[..., 1],
+        'pitch': cp_sequences[..., 2],
+        'duration': cp_sequences[..., 3]
+    }
+    y_gen_list = mft_extractor.extract_batch(batch_dict)
+    
+    # y_gen_list is a list of (num_bars, 4) arrays. We need to pad and stack them to (batch_size, num_features, time_steps)
+    # The paper uses shape (batch_size, 4, num_bars)
+    import numpy as np
+    max_bars = max([f.shape[0] for f in y_gen_list] + [1])
+    y_gen_padded = np.zeros((len(y_gen_list), max_bars, 4), dtype=np.float32)
+    for i, f in enumerate(y_gen_list):
+        if f.shape[0] > 0:
+            y_gen_padded[i, :f.shape[0], :] = f
+            
+    # Transpose to (batch_size, num_features, time_steps)
+    y_gen_padded = np.transpose(y_gen_padded, (0, 2, 1))
+    y_gen = torch.tensor(y_gen_padded, device=cp_sequences.device)
     
     # Calculate MSE per feature
     # Ensure shapes match; we might need to truncate to the shortest time_steps
@@ -67,7 +85,7 @@ def compute_quality_reward(
     with torch.no_grad():
         # Assuming the reward model returns a scalar for each sequence
         # Shape: (batch_size,)
-        rewards = reward_model(cp_sequences).squeeze(-1)
+        rewards = reward_model(cp_sequences[..., 0], cp_sequences[..., 1], cp_sequences[..., 2], cp_sequences[..., 3]).squeeze(-1)
         return rewards
 
 

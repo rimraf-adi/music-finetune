@@ -115,27 +115,36 @@ def build_dataloaders(config: Config, pretrain_seqs: List[np.ndarray], grpo_seqs
     val_dataset = CPDataset(val_seqs)
     grpo_dataset = CPDataset(grpo_seqs, prompt_len=config.data.max_seq_len // 4)
     
-    # Typically you get batch size from config, assuming 4 if not present
-    batch_size = 4
+    # Use pretrain batch size for pretrain, grpo batch size for grpo
+    train_batch_size = config.pretrain.batch_size
+    grpo_batch_size = config.grpo.batch_size
     
-    train_loader = DataLoader(
-        train_dataset, 
-        batch_size=batch_size, 
-        shuffle=True, 
-        collate_fn=collate_fn_pad
-    )
-    val_loader = DataLoader(
-        val_dataset, 
-        batch_size=batch_size, 
-        shuffle=False, 
-        collate_fn=collate_fn_pad
-    )
-    grpo_loader = DataLoader(
-        grpo_dataset, 
-        batch_size=batch_size, 
-        shuffle=True, 
-        collate_fn=collate_fn_pad
-    )
+    grpo_loader = None
+    if len(grpo_dataset) > 0:
+        grpo_loader = DataLoader(
+            grpo_dataset, 
+            batch_size=grpo_batch_size, 
+            shuffle=True, 
+            collate_fn=collate_fn_pad
+        )
+    
+    train_loader = None
+    if len(train_dataset) > 0:
+        train_loader = DataLoader(
+            train_dataset, 
+            batch_size=train_batch_size, 
+            shuffle=True, 
+            collate_fn=collate_fn_pad
+        )
+        
+    val_loader = None
+    if len(val_dataset) > 0:
+        val_loader = DataLoader(
+            val_dataset, 
+            batch_size=train_batch_size, 
+            shuffle=False, 
+            collate_fn=collate_fn_pad
+        )
     
     return {
         'train': train_loader,

@@ -42,18 +42,20 @@ def corrupt_sequences(sequences: torch.Tensor, config: Config) -> torch.Tensor:
             # Add noise to pitch (index 2 of the 4 tuple)
             pitch_noise = torch.randint(-2, 3, (seq_len,), device=sequences.device)
             new_pitch = corrupted[i, :, 2] + pitch_noise
-            # Clamp to pitch range
-            new_pitch = torch.clamp(new_pitch, config.data.min_pitch, config.data.max_pitch)
+            # Clamp to pitch vocab range (1 to 88, avoiding PAD 0 and EOS 89)
+            new_pitch = torch.clamp(new_pitch, 1, config.vocab.pitch_size - 2)
             corrupted[i, :, 2] = new_pitch
             
     return corrupted
 
 
+import pickle
+import pathlib
+
 def train_reward(config: Config):
     device = torch.device(config.device if torch.cuda.is_available() else "cpu")
     
-    # Initialize logger and metrics
-    logger = ExperimentLogger("reward_model_training", log_dir="logs")
+    # Initialize metrics and checkpoint manager
     metrics_store = MetricsStore()
     checkpoint_manager = CheckpointManager("checkpoints/reward_model")
     
@@ -62,28 +64,36 @@ def train_reward(config: Config):
     optimizer = AdamW(model.parameters(), lr=1e-4)
     
     # Get dataloaders
-    train_loader, val_loader = build_dataloaders(config)
+    with open(pathlib.Path(config.data.processed_dir) / "pretrain.pkl", "rb") as f:
+        pretrain_seqs = pickle.load(f)
+    loaders = build_dataloaders(config, pretrain_seqs, [])
+    train_loader = loaders['train']
+    val_loader = loaders['val']
     
     margin = 0.5
-    num_epochs = 10
+    num_epochs = config.reward_model.epochs
     best_val_loss = float('inf')
     
-    logger.info("Starting reward model training...")
+    print("Starting reward model training...")
     
     for epoch in range(num_epochs):
         model.train()
         train_loss = 0.0
         
         for batch_idx, batch in enumerate(train_loader):
-            # Assuming batch is a dictionary with "cp_sequences"
-            winners = batch["cp_sequences"].to(device)
+            input_dict, target_dict = batch
             
-            # Create losers via corruption
+            bar = torch.cat([input_dict['bar'], target_dict['bar'][:, -1:]], dim=1).to(device)
+            pos = torch.cat([input_dict['position'], target_dict['position'][:, -1:]], dim=1).to(device)
+            pitch = torch.cat([input_dict['pitch'], target_dict['pitch'][:, -1:]], dim=1).to(device)
+            dur = torch.cat([input_dict['duration'], target_dict['duration'][:, -1:]], dim=1).to(device)
+            
+            winners = torch.stack([bar, pos, pitch, dur], dim=-1)
             losers = corrupt_sequences(winners, config).to(device)
             
             # Forward pass
-            reward_winners = model(winners).squeeze(-1)
-            reward_losers = model(losers).squeeze(-1)
+            reward_winners = model(winners[..., 0], winners[..., 1], winners[..., 2], winners[..., 3]).squeeze(-1)
+            reward_losers = model(losers[..., 0], losers[..., 1], losers[..., 2], losers[..., 3]).squeeze(-1)
             
             # Bradley-Terry loss
             loss = -torch.log(torch.sigmoid(reward_winners - reward_losers - margin) + 1e-8).mean()
@@ -96,34 +106,40 @@ def train_reward(config: Config):
             train_loss += loss.item()
             
             if batch_idx % 10 == 0:
-                metrics_store.update({"train_loss": loss.item()}, step=epoch * len(train_loader) + batch_idx)
-                logger.info(f"Epoch {epoch}, Batch {batch_idx}: Train Loss = {loss.item():.4f}")
+                metrics_store.record(epoch * len(train_loader) + batch_idx, train_loss=loss.item())
+                print(f"Epoch {epoch}, Batch {batch_idx}: Train Loss = {loss.item():.4f}")
                 
-        avg_train_loss = train_loss / len(train_loader)
+        avg_train_loss = train_loss / max(1, len(train_loader))
         
         # Validation
         model.eval()
         val_loss = 0.0
         with torch.no_grad():
             for batch in val_loader:
-                winners = batch["cp_sequences"].to(device)
+                input_dict, target_dict = batch
+                bar = torch.cat([input_dict['bar'], target_dict['bar'][:, -1:]], dim=1).to(device)
+                pos = torch.cat([input_dict['position'], target_dict['position'][:, -1:]], dim=1).to(device)
+                pitch = torch.cat([input_dict['pitch'], target_dict['pitch'][:, -1:]], dim=1).to(device)
+                dur = torch.cat([input_dict['duration'], target_dict['duration'][:, -1:]], dim=1).to(device)
+                
+                winners = torch.stack([bar, pos, pitch, dur], dim=-1)
                 losers = corrupt_sequences(winners, config).to(device)
                 
-                reward_winners = model(winners).squeeze(-1)
-                reward_losers = model(losers).squeeze(-1)
+                reward_winners = model(winners[..., 0], winners[..., 1], winners[..., 2], winners[..., 3]).squeeze(-1)
+                reward_losers = model(losers[..., 0], losers[..., 1], losers[..., 2], losers[..., 3]).squeeze(-1)
                 
                 loss = -torch.log(torch.sigmoid(reward_winners - reward_losers - margin) + 1e-8).mean()
                 val_loss += loss.item()
                 
-        avg_val_loss = val_loss / len(val_loader)
-        metrics_store.update({"val_loss": avg_val_loss}, step=(epoch + 1) * len(train_loader))
-        logger.info(f"Epoch {epoch} Summary: Train Loss = {avg_train_loss:.4f}, Val Loss = {avg_val_loss:.4f}")
+        avg_val_loss = val_loss / max(1, len(val_loader))
+        metrics_store.record((epoch + 1) * len(train_loader), val_loss=avg_val_loss)
+        print(f"Epoch {epoch} Summary: Train Loss = {avg_train_loss:.4f}, Val Loss = {avg_val_loss:.4f}")
         
         # Save best checkpoint
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
-            checkpoint_manager.save(model, optimizer, epoch, is_best=True)
-            logger.info("Saved new best checkpoint.")
+            checkpoint_manager.save(step=epoch, model=model, optimizer=optimizer)
+            print("Saved new best checkpoint.")
 
 
 if __name__ == "__main__":
