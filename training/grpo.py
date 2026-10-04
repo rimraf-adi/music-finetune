@@ -157,15 +157,25 @@ def train_grpo(config: Config):
             active_entropy = active_policy.entropy(completions['bar'], completions['position'], completions['pitch'], completions['duration'], ref_embeddings=encoded_ref)['entropy_normalized']
             
             with torch.no_grad():
-                ref_log_probs = ref_policy.log_probs(completions['bar'], completions['position'], completions['pitch'], completions['duration'], ref_embeddings=encoded_ref).sum(dim=1)
+                # The reference policy is the base pre-trained model, which was NOT trained with ref_embeddings.
+                # Passing ref_embeddings to it would corrupt its predictions and cause KL divergence to explode.
+                ref_log_probs = ref_policy.log_probs(completions['bar'], completions['position'], completions['pitch'], completions['duration']).sum(dim=1)
                 
-            ratio = torch.exp(active_log_probs - ref_log_probs)
+            # Compute ratio in float32 to prevent float16/float32 overflow
+            log_ratio = (active_log_probs - ref_log_probs).float()
             
-            surrogate1 = ratio * A_hat
-            surrogate2 = torch.clamp(ratio, 1.0 - clip_ratio, 1.0 + clip_ratio) * A_hat
+            # Clamp log_ratio to [-20, 20] so ratio is bounded between ~2e-9 and ~4.8e8
+            log_ratio = torch.clamp(log_ratio, min=-20.0, max=20.0)
+            ratio = torch.exp(log_ratio)
+            
+            # Group-relative advantage A_hat should also be float32 for safety
+            A_hat_f32 = A_hat.float()
+            
+            surrogate1 = ratio * A_hat_f32
+            surrogate2 = torch.clamp(ratio, 1.0 - clip_ratio, 1.0 + clip_ratio) * A_hat_f32
             policy_loss = -torch.min(surrogate1, surrogate2).mean()
             
-            kl_div = (ref_log_probs - active_log_probs).mean()
+            kl_div = -log_ratio.mean()
             kl_loss = beta * kl_div
             
             mean_entropy = active_entropy.mean()

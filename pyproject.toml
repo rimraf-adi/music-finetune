@@ -38,3 +38,14 @@ dev-dependencies = [
     "pytest>=7.4.0",
     "ipython>=8.0.0",
 ]
+
+
+[tool.uv.sources]
+torch = { index = "pytorch" }
+torchaudio = { index = "pytorch" }
+torchvision = { index = "pytorch" }
+
+[[tool.uv.index]]
+name = "pytorch"
+url = "https://download.pytorch.org/whl/cu124"
+explicit = true

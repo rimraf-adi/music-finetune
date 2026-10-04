@@ -157,8 +157,9 @@ class CPTokenizer:
         Returns:
             List of tokenized sequences.
         """
+        import tqdm
         corpus = []
-        for path in midi_paths:
+        for path in tqdm.tqdm(midi_paths, desc="Tokenizing MIDI Files"):
             tokens = self.encode(path)
             if len(tokens) > 0:
                 if len(tokens) > max_seq_len:

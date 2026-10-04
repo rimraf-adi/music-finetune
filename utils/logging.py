@@ -86,7 +86,7 @@ class ExperimentLogger:
             "torch_version": torch.__version__,
             "cuda_available": torch.cuda.is_available(),
             "cuda_device": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
-            "cuda_memory_gb": round(torch.cuda.get_device_properties(0).total_mem / 1e9, 1) if torch.cuda.is_available() else None,
+            "cuda_memory_gb": round(torch.cuda.get_device_properties(0).total_memory / 1e9, 1) if torch.cuda.is_available() else None,
         }
         if config is not None:
             meta["config"] = _dataclass_to_dict(config)
