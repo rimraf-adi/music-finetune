@@ -54,10 +54,11 @@ class CPTransformer(nn.Module):
         mask = mask.float().masked_fill(mask == 0, float('-inf')).masked_fill(mask == 1, float(0.0))
         return mask
 
-    def forward(self, bar: torch.Tensor, pos: torch.Tensor, pitch: torch.Tensor, dur: torch.Tensor, mask: torch.Tensor = None) -> dict:
+    def forward(self, bar: torch.Tensor, pos: torch.Tensor, pitch: torch.Tensor, dur: torch.Tensor, ref_embeddings: torch.Tensor = None, mask: torch.Tensor = None) -> dict:
         """
         Args:
             bar, pos, pitch, dur: LongTensors of shape (batch_size, seq_len)
+            ref_embeddings: Optional Tensor of shape (batch_size, num_bars, d_model)
             mask: Optional causal mask
         Returns:
             dict with logits for each attribute
@@ -79,13 +80,23 @@ class CPTransformer(nn.Module):
         positions = torch.arange(0, seq_len, dtype=torch.long, device=device).unsqueeze(0).expand(b_sz, seq_len)
         x = x + self.pos_encoding(positions)
         
+        num_ref = 0
+        if ref_embeddings is not None:
+            num_ref = ref_embeddings.size(1)
+            x = torch.cat([ref_embeddings, x], dim=1)
+            
+        total_len = num_ref + seq_len
+        
         # Causal mask (upper triangular) to enforce autoregressive generation
         if mask is None:
-            mask = self._generate_square_subsequent_mask(seq_len, device)
+            mask = self._generate_square_subsequent_mask(total_len, device)
             
         # Pass through Transformer
         x = self.transformer(x, mask=mask, is_causal=True)
         
+        if num_ref > 0:
+            x = x[:, num_ref:, :]
+            
         # Output heads
         logits_bar = self.bar_head(x)
         logits_pos = self.pos_head(x)
@@ -127,7 +138,7 @@ class CPTransformer(nn.Module):
         return loss_dict
 
     @torch.no_grad()
-    def generate(self, prompt_bar: torch.Tensor, prompt_pos: torch.Tensor, prompt_pitch: torch.Tensor, prompt_dur: torch.Tensor, max_new_tokens: int, temperature: float = 1.0, top_p: float = 0.95) -> dict:
+    def generate(self, prompt_bar: torch.Tensor, prompt_pos: torch.Tensor, prompt_pitch: torch.Tensor, prompt_dur: torch.Tensor, max_new_tokens: int, temperature: float = 1.0, top_p: float = 0.95, ref_embeddings: torch.Tensor = None) -> dict:
         """
         Autoregressive generation with nucleus sampling
         """
@@ -135,7 +146,7 @@ class CPTransformer(nn.Module):
         bar, pos, pitch, dur = prompt_bar, prompt_pos, prompt_pitch, prompt_dur
         
         for _ in range(max_new_tokens):
-            logits_dict = self.forward(bar, pos, pitch, dur)
+            logits_dict = self.forward(bar, pos, pitch, dur, ref_embeddings=ref_embeddings)
             
             next_tokens = {}
             for attr in ['bar', 'position', 'pitch', 'duration']:
@@ -171,12 +182,12 @@ class CPTransformer(nn.Module):
             'duration': dur
         }
 
-    def log_probs(self, bar: torch.Tensor, pos: torch.Tensor, pitch: torch.Tensor, dur: torch.Tensor) -> torch.Tensor:
+    def log_probs(self, bar: torch.Tensor, pos: torch.Tensor, pitch: torch.Tensor, dur: torch.Tensor, ref_embeddings: torch.Tensor = None) -> torch.Tensor:
         """
         Compute sum of log-probabilities across all 4 attribute heads.
         Returns: Tensor of shape (batch, seq_len)
         """
-        logits_dict = self.forward(bar, pos, pitch, dur)
+        logits_dict = self.forward(bar, pos, pitch, dur, ref_embeddings=ref_embeddings)
         total_log_probs = 0
         
         for attr, tokens in [('bar', bar), ('position', pos), ('pitch', pitch), ('duration', dur)]:
@@ -189,11 +200,11 @@ class CPTransformer(nn.Module):
             
         return total_log_probs
 
-    def entropy(self, bar: torch.Tensor, pos: torch.Tensor, pitch: torch.Tensor, dur: torch.Tensor) -> dict:
+    def entropy(self, bar: torch.Tensor, pos: torch.Tensor, pitch: torch.Tensor, dur: torch.Tensor, ref_embeddings: torch.Tensor = None) -> dict:
         """
         Per-attribute entropy of the output distribution.
         """
-        logits_dict = self.forward(bar, pos, pitch, dur)
+        logits_dict = self.forward(bar, pos, pitch, dur, ref_embeddings=ref_embeddings)
         entropy_dict = {}
         
         vocab_sizes = {

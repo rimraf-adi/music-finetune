@@ -107,8 +107,12 @@ def train_grpo(config: Config):
         
         B = prompt_bar.size(0)
         
-        # Create dummy y_ref (batch, num_features, time_steps)
+        # Create random y_ref trajectories for training (batch, num_features, time_steps)
         y_ref = torch.zeros((B, 4, 32), device=device)
+        y_ref[:, 0, :] = torch.rand((B, 32), device=device) * 20.0          # Note density: 0-20
+        y_ref[:, 1, :] = torch.rand((B, 32), device=device) * 87.0 + 21.0   # Pitch centroid: 21-108
+        y_ref[:, 2, :] = torch.rand((B, 32), device=device)                 # Tonal tension: 0-1
+        y_ref[:, 3, :] = torch.rand((B, 32), device=device)                 # Rhythmic complexity: 0-1
         
         # We need to expand prompts and y_ref for group size G
         prompt_bar = prompt_bar.repeat_interleave(G, dim=0)
@@ -117,14 +121,20 @@ def train_grpo(config: Config):
         prompt_dur = prompt_dur.repeat_interleave(G, dim=0)
         y_ref_expanded = y_ref.repeat_interleave(G, dim=0)
         
-        # 2. Generate completions (active policy)
+        # 2. Encode Reference
+        # ReferenceEncoder expects (B, num_bars, num_features)
+        y_ref_t = y_ref_expanded.transpose(1, 2)
+        encoded_ref = ref_encoder(y_ref_t)
+        
+        # 2b. Generate completions (active policy)
         with torch.no_grad():
             completions = active_policy.generate(
                 prompt_bar=prompt_bar,
                 prompt_pos=prompt_pos,
                 prompt_pitch=prompt_pitch,
                 prompt_dur=prompt_dur,
-                max_new_tokens=16
+                max_new_tokens=config.grpo.completion_len,
+                ref_embeddings=encoded_ref
             )
             
         # 3. Evaluate combined reward
@@ -143,11 +153,11 @@ def train_grpo(config: Config):
         
         # 5. Compute GRPO Loss
         with torch.amp.autocast('cuda', enabled=torch.cuda.is_available()):
-            active_log_probs = active_policy.log_probs(completions['bar'], completions['position'], completions['pitch'], completions['duration']).sum(dim=1)
-            active_entropy = active_policy.entropy(completions['bar'], completions['position'], completions['pitch'], completions['duration'])['entropy_normalized']
+            active_log_probs = active_policy.log_probs(completions['bar'], completions['position'], completions['pitch'], completions['duration'], ref_embeddings=encoded_ref).sum(dim=1)
+            active_entropy = active_policy.entropy(completions['bar'], completions['position'], completions['pitch'], completions['duration'], ref_embeddings=encoded_ref)['entropy_normalized']
             
             with torch.no_grad():
-                ref_log_probs = ref_policy.log_probs(completions['bar'], completions['position'], completions['pitch'], completions['duration']).sum(dim=1)
+                ref_log_probs = ref_policy.log_probs(completions['bar'], completions['position'], completions['pitch'], completions['duration'], ref_embeddings=encoded_ref).sum(dim=1)
                 
             ratio = torch.exp(active_log_probs - ref_log_probs)
             
