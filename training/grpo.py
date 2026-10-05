@@ -27,17 +27,24 @@ def train_grpo(config: Config):
     # Load Models
     active_policy = CPTransformer(config).to(device)
     
-    # LOAD PRETRAIN CHECKPOINT
+    # LOAD PRETRAIN / SFT CHECKPOINT
     import os
     import glob
-    pretrain_dirs = sorted(glob.glob("checkpoints/pretrain_*"))
-    if pretrain_dirs:
-        latest_pretrain_dir = pretrain_dirs[-1]
-        step_dirs = sorted(glob.glob(f"{latest_pretrain_dir}/step_*"))
-        if step_dirs:
-            latest_step_dir = step_dirs[-1]
-            print(f"Loading pretrain checkpoint from {latest_step_dir}")
-            active_policy.load_state_dict(torch.load(os.path.join(latest_step_dir, "model.pt"), weights_only=True))
+    
+    sft_dirs = sorted(glob.glob("checkpoints/sft_conditioned/step_*"))
+    if sft_dirs:
+        latest_sft_dir = sft_dirs[-1]
+        print(f"Loading warm-started SFT checkpoint from {latest_sft_dir}...")
+        active_policy.load_state_dict(torch.load(os.path.join(latest_sft_dir, "model.pt"), weights_only=True))
+    else:
+        pretrain_dirs = sorted(glob.glob("checkpoints/pretrain_*"))
+        if pretrain_dirs:
+            latest_pretrain_dir = pretrain_dirs[-1]
+            step_dirs = sorted(glob.glob(f"{latest_pretrain_dir}/step_*"))
+            if step_dirs:
+                latest_step_dir = step_dirs[-1]
+                print(f"Loading pretrain checkpoint from {latest_step_dir}")
+                active_policy.load_state_dict(torch.load(os.path.join(latest_step_dir, "model.pt"), weights_only=True))
             
     ref_policy = CPTransformer(config).to(device)
     ref_policy.load_state_dict(active_policy.state_dict())
@@ -59,6 +66,12 @@ def train_grpo(config: Config):
         param.requires_grad = False
         
     ref_encoder = ReferenceEncoder(config).to(device)
+    if sft_dirs:
+        ref_enc_path = os.path.join(sft_dirs[-1], "ref_encoder.pt")
+        if os.path.exists(ref_enc_path):
+            print(f"Loading warm-started ReferenceEncoder weights from {ref_enc_path}...")
+            ref_encoder.load_state_dict(torch.load(ref_enc_path, weights_only=True))
+            
     mft_extractor = MFTExtractor()
     
     optimizer = AdamW(list(active_policy.parameters()) + list(ref_encoder.parameters()), lr=1e-5)

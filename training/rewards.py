@@ -59,27 +59,35 @@ def compute_tracking_reward(
     y_gen = y_gen[:, :, :min_time_steps]
     y_ref = y_ref[:, :, :min_time_steps]
     
+    # Normalize both y_gen and y_ref into [0, 1] using MFTConfig ranges
+    # ranges: nd (0-20), pc (21-108), tt (0-1), rc (0-1)
+    min_vals = torch.tensor([config.mft.nd_range[0], config.mft.pc_range[0], config.mft.tt_range[0], config.mft.rc_range[0]], device=cp_sequences.device).view(1, 4, 1)
+    max_vals = torch.tensor([config.mft.nd_range[1], config.mft.pc_range[1], config.mft.tt_range[1], config.mft.rc_range[1]], device=cp_sequences.device).view(1, 4, 1)
+    spans = (max_vals - min_vals).clamp(min=1e-5)
+
+    y_gen_norm = torch.clamp((y_gen - min_vals) / spans, 0.0, 1.0)
+    y_ref_norm = torch.clamp((y_ref - min_vals) / spans, 0.0, 1.0)
+
     # After truncation, apply mask
     validity_mask = validity_mask[:, :min_time_steps]  # (batch, time_steps)
     
-    # MSE only over valid bars
-    sq_error = (y_gen - y_ref) ** 2  # (batch, features, time_steps)
+    # Normalized squared error per feature
+    sq_error = (y_gen_norm - y_ref_norm) ** 2  # (batch, features, time_steps)
     # Mask: expand to (batch, 1, time_steps) for broadcasting
     masked_sq_error = sq_error * validity_mask.unsqueeze(1)
     # Mean over valid time steps only
     valid_counts = validity_mask.sum(dim=1, keepdim=True).clamp(min=1)  # (batch, 1)
     mse = masked_sq_error.sum(dim=2) / valid_counts  # (batch, features)
     
-    # RMSE
-    rmse = torch.sqrt(mse + 1e-8)
+    # Normalized RMSE in [0, 1] range
+    norm_rmse = torch.sqrt(mse + 1e-8)
     
-    # Weights from config
-    # Weights shape: (num_features,)
+    # Weights from config (shape: num_features)
     weights = torch.tensor(config.mft.weights, device=cp_sequences.device, dtype=torch.float32)
+    weights = weights / weights.sum() # Normalize weights to sum to 1.0
     
-    # Weighted negative RMSE sum
-    # shape: (batch_size,)
-    tracking_reward = -torch.sum(rmse * weights.unsqueeze(0), dim=1)
+    # Tracking reward: negative weighted normalized RMSE in [-1.0, 0.0]
+    tracking_reward = -torch.sum(norm_rmse * weights.unsqueeze(0), dim=1)
     
     return tracking_reward
 
