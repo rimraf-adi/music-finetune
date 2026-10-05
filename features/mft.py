@@ -28,21 +28,15 @@ class MFTExtractor:
                 break
             
             if b == 1:  # NEW_BAR
-                if current_bar or not bars_data:
-                    # Start a new bar. If we already had notes, save them.
-                    # If this is the first NEW_BAR, just prepare the current_bar.
-                    if current_bar:
-                        bars_data.append(current_bar)
-                        current_bar = []
-                    elif not bars_data and not current_bar:
-                        # Handles the very first NEW_BAR token without adding an empty bar beforehand
-                        pass
+                if bars_data or current_bar:  # Not the very first token
+                    bars_data.append(current_bar)
+                    current_bar = []
 
             # Valid note condition: bar != PAD and bar != EOS, pitch != PAD and pitch != EOS
             if b != 0 and b != 3 and p != 0 and p != 89:
                 current_bar.append((pos, p))
                 
-        if current_bar or not bars_data:
+        if current_bar:
             bars_data.append(current_bar)
             
         return bars_data
@@ -72,7 +66,7 @@ class MFTExtractor:
         num_bars = len(bars_data)
         
         if num_bars == 0:
-            return np.zeros((0, 4), dtype=np.float32)
+            return np.zeros((1, 4), dtype=np.float32)  # Return 1 zero bar as fallback
             
         features = np.zeros((num_bars, 4), dtype=np.float32)
         
@@ -104,7 +98,7 @@ class MFTExtractor:
                 
             # d) Rhythmic Complexity RC(b)
             if len(notes) >= 2:
-                positions = sorted([pos for pos, _ in notes])
+                positions = sorted(set(pos for pos, _ in notes))  # Use unique positions
                 iois = [positions[j] - positions[j-1] for j in range(1, len(positions))]
                 if iois:
                     unique, counts = np.unique(iois, return_counts=True)
@@ -130,6 +124,7 @@ class MFTExtractor:
             
         Returns:
             List of (num_bars, 4) arrays, one for each sequence in the batch.
+            Note: Padding is handled by the caller (rewards.py).
         """
         bars = batch_dict['bar']
         positions = batch_dict['position']

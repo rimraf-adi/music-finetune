@@ -58,6 +58,7 @@ class RewardModel(nn.Module):
             config = get_config()
             
         # Simple embeddings to project CP tokens into BERT's 768-dim input space
+        # Embeddings are 192-dim (compatible with trained checkpoint) and concatenated to 768
         self.bar_embed = nn.Embedding(config.vocab.bar_size, 192)
         self.pos_embed = nn.Embedding(config.vocab.position_size, 192)
         self.pitch_embed = nn.Embedding(config.vocab.pitch_size, 192)
@@ -98,15 +99,23 @@ class RewardModel(nn.Module):
         e_pitch = self.pitch_embed(pitch)
         e_dur = self.dur_embed(dur)
         
+        # Create attention mask (1 for real tokens, 0 for padding)
+        attention_mask = (bar != 0).long()  # pad_id = 0
+        
         # Concatenate 4x192 -> 768-dim
         inputs_embeds = torch.cat([e_bar, e_pos, e_pitch, e_dur], dim=-1)
         
         # Pass through MidiBERT encoder
-        outputs = self.bert(inputs_embeds=inputs_embeds)
+        outputs = self.bert(inputs_embeds=inputs_embeds, attention_mask=attention_mask)
         
         # Mean-pool the hidden states
         hidden_states = outputs.last_hidden_state # (batch, seq_len, 768)
-        pooled = hidden_states.mean(dim=1) # (batch, 768)
+        
+        # Masked mean pooling
+        mask_expanded = attention_mask.unsqueeze(-1).float()  # (batch, seq_len, 1)
+        sum_hidden = (hidden_states * mask_expanded).sum(dim=1)  # (batch, 768)
+        counts = mask_expanded.sum(dim=1).clamp(min=1)  # (batch, 1)
+        pooled = sum_hidden / counts  # (batch, 768)
         
         # Pass through reward MLP head
         reward = self.reward_head(pooled).squeeze(-1) # (batch,)

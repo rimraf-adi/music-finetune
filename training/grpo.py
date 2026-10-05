@@ -106,6 +106,7 @@ def train_grpo(config: Config):
         prompt_dur = prompt_dict['duration'].to(device)
         
         B = prompt_bar.size(0)
+        prompt_len = prompt_bar.size(1)
         
         # Create random y_ref trajectories for training (batch, num_features, time_steps)
         y_ref = torch.zeros((B, 4, 32), device=device)
@@ -152,33 +153,48 @@ def train_grpo(config: Config):
         A_hat = ((rewards_view - mean_r) / (std_r + eps)).view(B * G)
         
         # 5. Compute GRPO Loss
+        prompt_len = prompt_dict['bar'].size(1)  # Original prompt length before repeat_interleave
         with torch.amp.autocast('cuda', enabled=torch.cuda.is_available()):
-            active_log_probs = active_policy.log_probs(completions['bar'], completions['position'], completions['pitch'], completions['duration'], ref_embeddings=encoded_ref).sum(dim=1)
-            active_entropy = active_policy.entropy(completions['bar'], completions['position'], completions['pitch'], completions['duration'], ref_embeddings=encoded_ref)['entropy_normalized']
+            # Get per-token log probs (shape: batch, completion_len-1 due to shift)
+            active_log_probs = active_policy.log_probs(
+                completions['bar'], completions['position'],
+                completions['pitch'], completions['duration'],
+                ref_embeddings=encoded_ref
+            )
+            # Only keep completion tokens (exclude prompt)
+            active_log_probs = active_log_probs[:, prompt_len-1:]  # -1 because log_probs shifts by 1
+            
+            active_entropy = active_policy.entropy(
+                completions['bar'][:, prompt_len:], completions['position'][:, prompt_len:],
+                completions['pitch'][:, prompt_len:], completions['duration'][:, prompt_len:],
+                ref_embeddings=encoded_ref
+            )['entropy_normalized']
             
             with torch.no_grad():
-                # The reference policy is the base pre-trained model, which was NOT trained with ref_embeddings.
-                # Passing ref_embeddings to it would corrupt its predictions and cause KL divergence to explode.
-                ref_log_probs = ref_policy.log_probs(completions['bar'], completions['position'], completions['pitch'], completions['duration']).sum(dim=1)
+                ref_log_probs = ref_policy.log_probs(
+                    completions['bar'], completions['position'],
+                    completions['pitch'], completions['duration']
+                )
+                ref_log_probs = ref_log_probs[:, prompt_len-1:]
                 
-            # Compute ratio in float32 to prevent float16/float32 overflow
+            # Per-token ratio in float32
             log_ratio = (active_log_probs - ref_log_probs).float()
-            
-            # Clamp log_ratio to [-20, 20] so ratio is bounded between ~2e-9 and ~4.8e8
-            log_ratio = torch.clamp(log_ratio, min=-20.0, max=20.0)
+            log_ratio = torch.clamp(log_ratio, min=-10.0, max=10.0)
             ratio = torch.exp(log_ratio)
             
-            # Group-relative advantage A_hat should also be float32 for safety
-            A_hat_f32 = A_hat.float()
+            # Expand A_hat to match per-token shape: (batch,) -> (batch, 1)
+            A_hat_f32 = A_hat.float().unsqueeze(1)
             
+            # Per-token clipped surrogate
             surrogate1 = ratio * A_hat_f32
             surrogate2 = torch.clamp(ratio, 1.0 - clip_ratio, 1.0 + clip_ratio) * A_hat_f32
             policy_loss = -torch.min(surrogate1, surrogate2).mean()
             
-            kl_div = -log_ratio.mean()
+            # KL divergence (correct sign: positive KL)
+            kl_div = log_ratio.mean()
             kl_loss = beta * kl_div
             
-            mean_entropy = active_entropy.mean()
+            mean_entropy = active_entropy.mean() if isinstance(active_entropy, torch.Tensor) and active_entropy.dim() > 0 else active_entropy
             entropy_loss = lambd * (F.relu(H_target - mean_entropy) ** 2)
             
             total_loss = policy_loss + kl_loss + entropy_loss

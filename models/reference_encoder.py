@@ -16,7 +16,8 @@ class ReferenceEncoder(nn.Module):
         self.tt_embed = nn.Embedding(11, self.d_model // 4)
         self.rc_embed = nn.Embedding(11, self.d_model // 4)
         
-        self.proj = nn.Linear(self.d_model, self.d_model)
+        self.embed_dim = self.d_model // 4
+        self.proj = nn.Linear(4 * self.embed_dim, self.d_model)
         
         self._log_params()
         
@@ -27,6 +28,12 @@ class ReferenceEncoder(nn.Module):
         """
         Discretize continuous/discrete features into bin indices.
         y_ref: (batch, num_bars, 4) - [note_density, pitch_centroid, tonal_tension, rhythmic_complexity]
+        
+        IMPORTANT: Expects RAW (unnormalized) values:
+            - note_density: 0-20 (notes per bar)
+            - pitch_centroid: 21-108 (MIDI pitch)
+            - tonal_tension: 0.0-1.0
+            - rhythmic_complexity: 0.0-1.0
         """
         # note_density: bin into 21 levels (0-20 notes/bar)
         nd = torch.clamp(torch.round(y_ref[..., 0]), 0, 20).long()

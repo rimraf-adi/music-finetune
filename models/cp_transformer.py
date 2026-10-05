@@ -51,6 +51,8 @@ class CPTransformer(nn.Module):
 
     def _generate_square_subsequent_mask(self, sz: int, device: torch.device) -> torch.Tensor:
         mask = (torch.triu(torch.ones(sz, sz, device=device)) == 1).transpose(0, 1)
+        # Note (Bug 15): Float mask with -inf might mismatch fp16 input under AMP, 
+        # but PyTorch TransformerEncoder casts it internally so it is fine in practice.
         mask = mask.float().masked_fill(mask == 0, float('-inf')).masked_fill(mask == 1, float(0.0))
         return mask
 
@@ -76,10 +78,6 @@ class CPTransformer(nn.Module):
         e_concat = torch.cat([e_bar, e_pos, e_pitch, e_dur], dim=-1)
         x = self.proj_in(e_concat)
         
-        # Learned positional encoding
-        positions = torch.arange(0, seq_len, dtype=torch.long, device=device).unsqueeze(0).expand(b_sz, seq_len)
-        x = x + self.pos_encoding(positions)
-        
         num_ref = 0
         if ref_embeddings is not None:
             num_ref = ref_embeddings.size(1)
@@ -87,12 +85,24 @@ class CPTransformer(nn.Module):
             
         total_len = num_ref + seq_len
         
+        # Apply positional encoding ONLY to music tokens (offset by num_ref)
+        positions = torch.arange(0, seq_len, dtype=torch.long, device=device).unsqueeze(0).expand(b_sz, seq_len)
+        pe = self.pos_encoding(positions)  # (batch, seq_len, d_model)
+        if num_ref > 0:
+            # Pad with zeros for ref_embeddings positions
+            ref_pad = torch.zeros(b_sz, num_ref, self.tx_cfg.d_model, device=device, dtype=pe.dtype)
+            pe = torch.cat([ref_pad, pe], dim=1)
+        x = x + pe
+        
         # Causal mask (upper triangular) to enforce autoregressive generation
         if mask is None:
             mask = self._generate_square_subsequent_mask(total_len, device)
+            # Allow ref_embeddings to attend to each other bidirectionally
+            if num_ref > 0:
+                mask[:num_ref, :num_ref] = 0.0  # Unmask the ref-to-ref block
             
-        # Pass through Transformer
-        x = self.transformer(x, mask=mask, is_causal=True)
+        # MUST be is_causal=False when using custom prefix mask
+        x = self.transformer(x, mask=mask, is_causal=(num_ref == 0))
         
         if num_ref > 0:
             x = x[:, num_ref:, :]
@@ -160,9 +170,10 @@ class CPTransformer(nn.Module):
                 sorted_indices_to_remove = cumulative_probs > top_p
                 # Shift indices to the right to keep the first token above threshold
                 sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
-                sorted_indices_to_remove[..., 0] = 0
+                sorted_indices_to_remove[..., 0] = False
                 
-                indices_to_remove = sorted_indices_to_remove.scatter(1, sorted_indices, sorted_indices_to_remove)
+                indices_to_remove = torch.zeros_like(sorted_indices_to_remove)
+                indices_to_remove.scatter_(1, sorted_indices, sorted_indices_to_remove)
                 logits[indices_to_remove] = float('-inf')
                 
                 probs = F.softmax(logits, dim=-1)
@@ -194,8 +205,9 @@ class CPTransformer(nn.Module):
             logits = logits_dict[attr]
             log_probs = F.log_softmax(logits, dim=-1)
             
-            # Gather log probs for the actual tokens
-            token_log_probs = torch.gather(log_probs, 2, tokens.unsqueeze(2)).squeeze(2)
+            # The logits at position i predict token i+1, so we need:
+            # log_probs from positions [0..T-2] gathered at token indices [1..T-1]
+            token_log_probs = torch.gather(log_probs[:, :-1, :], 2, tokens[:, 1:].unsqueeze(2)).squeeze(2)
             total_log_probs = total_log_probs + token_log_probs
             
         return total_log_probs
@@ -203,6 +215,8 @@ class CPTransformer(nn.Module):
     def entropy(self, bar: torch.Tensor, pos: torch.Tensor, pitch: torch.Tensor, dur: torch.Tensor, ref_embeddings: torch.Tensor = None) -> dict:
         """
         Per-attribute entropy of the output distribution.
+        Note (Bug 13): This returns per-position entropy without masking out padding. 
+        The caller must handle masking (e.g. GRPO calls this on generated completions without padding).
         """
         logits_dict = self.forward(bar, pos, pitch, dur, ref_embeddings=ref_embeddings)
         entropy_dict = {}

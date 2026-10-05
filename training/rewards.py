@@ -37,22 +37,38 @@ def compute_tracking_reward(
     import numpy as np
     max_bars = max([f.shape[0] for f in y_gen_list] + [1])
     y_gen_padded = np.zeros((len(y_gen_list), max_bars, 4), dtype=np.float32)
+    # Create validity mask to avoid averaging over padding
+    validity_mask = torch.zeros(len(y_gen_list), max_bars, device=cp_sequences.device)
     for i, f in enumerate(y_gen_list):
         if f.shape[0] > 0:
             y_gen_padded[i, :f.shape[0], :] = f
+            validity_mask[i, :f.shape[0]] = 1.0
             
     # Transpose to (batch_size, num_features, time_steps)
     y_gen_padded = np.transpose(y_gen_padded, (0, 2, 1))
     y_gen = torch.tensor(y_gen_padded, device=cp_sequences.device)
     
+    # Ensure y_ref is (batch, num_features, time_steps)
+    if y_ref.dim() == 3 and y_ref.size(1) != 4:
+        # Likely (batch, time_steps, features), transpose to (batch, features, time_steps)
+        y_ref = y_ref.transpose(1, 2)
+        
     # Calculate MSE per feature
     # Ensure shapes match; we might need to truncate to the shortest time_steps
     min_time_steps = min(y_gen.size(2), y_ref.size(2))
     y_gen = y_gen[:, :, :min_time_steps]
     y_ref = y_ref[:, :, :min_time_steps]
     
-    # MSE: (batch_size, num_features)
-    mse = torch.mean((y_gen - y_ref) ** 2, dim=2)
+    # After truncation, apply mask
+    validity_mask = validity_mask[:, :min_time_steps]  # (batch, time_steps)
+    
+    # MSE only over valid bars
+    sq_error = (y_gen - y_ref) ** 2  # (batch, features, time_steps)
+    # Mask: expand to (batch, 1, time_steps) for broadcasting
+    masked_sq_error = sq_error * validity_mask.unsqueeze(1)
+    # Mean over valid time steps only
+    valid_counts = validity_mask.sum(dim=1, keepdim=True).clamp(min=1)  # (batch, 1)
+    mse = masked_sq_error.sum(dim=2) / valid_counts  # (batch, features)
     
     # RMSE
     rmse = torch.sqrt(mse + 1e-8)
@@ -85,7 +101,9 @@ def compute_quality_reward(
     with torch.no_grad():
         # Assuming the reward model returns a scalar for each sequence
         # Shape: (batch_size,)
-        rewards = reward_model(cp_sequences[..., 0], cp_sequences[..., 1], cp_sequences[..., 2], cp_sequences[..., 3]).squeeze(-1)
+        rewards = reward_model(cp_sequences[..., 0], cp_sequences[..., 1], cp_sequences[..., 2], cp_sequences[..., 3])
+        if rewards.dim() > 1:
+            rewards = rewards.squeeze(-1)
         return rewards
 
 
